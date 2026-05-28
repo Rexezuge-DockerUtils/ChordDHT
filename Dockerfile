@@ -13,6 +13,6 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 FROM scratch
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=builder /node /node
+COPY --from=builder /node /ChordDHT-Node
 
-ENTRYPOINT ["/node"]
+ENTRYPOINT ["/ChordDHT-Node"]
