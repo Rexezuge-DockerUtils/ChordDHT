@@ -1,6 +1,7 @@
 package chord
 
 import (
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,15 @@ type Options struct {
 	SuspiciousThreshold int
 	FailedThreshold     int
 	TrackerSeedCount    int
+	// NodeCertificate holds the node's own certificate as raw JSON.
+	// When set, it is attached to JoinRequest, NotifyRequest, and tracker registration.
+	NodeCertificate json.RawMessage
+	// NodeCertExpiresAt is the Unix timestamp when the node's certificate expires.
+	// Sent to tracker in heartbeat as cert_expires_at.
+	NodeCertExpiresAt *int64
+	// OnCRLRefresh is called after each successful tracker heartbeat with the raw CRL JSON
+	// (or nil if no CRL is available). May be nil.
+	OnCRLRefresh func(crlJSON []byte)
 }
 
 func DefaultOptions() Options {
@@ -221,6 +231,8 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 	}
 
 	self := n.Self().Core()
+	selfWithCert := self
+	selfWithCert.Certificate = n.options.NodeCertificate
 	for _, seed := range seeds {
 		if seed.NodeID == self.NodeID {
 			logging.Debugf("ignoring self seed node_id=%s uri=%s", seed.NodeID, seed.URI)
@@ -231,7 +243,7 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 			continue
 		}
 		logging.Debugf("attempting join via seed node_id=%s uri=%s", seed.NodeID, seed.URI)
-		resp, err := n.client.Join(seed.URI, JoinRequest{Node: self})
+		resp, err := n.client.Join(seed.URI, JoinRequest{Node: selfWithCert})
 		if err != nil {
 			logging.Warnf("join via seed failed node_id=%s uri=%s error=%v", seed.NodeID, seed.URI, err)
 			continue
@@ -250,7 +262,7 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 		n.status = StatusActive
 		n.mu.Unlock()
 		logging.Infof("joined network via seed=%s successor=%s successor_list_size=%d", seed.NodeID, resp.Successor.NodeID, len(resp.SuccessorList))
-		_, _ = n.client.Notify(resp.Successor.URI, NotifyRequest{Node: self})
+		_, _ = n.client.Notify(resp.Successor.URI, NotifyRequest{Node: selfWithCert})
 		n.registerTracker()
 		return nil
 	}
@@ -264,6 +276,7 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 func (n *Node) registerTracker() {
 	if n.tracker != nil {
 		self := n.Self().Core()
+		self.Certificate = n.options.NodeCertificate
 		if err := n.tracker.Register(self); err != nil {
 			logging.Warnf("tracker registration failed node_id=%s error=%v", self.NodeID, err)
 			return

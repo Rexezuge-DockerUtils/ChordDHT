@@ -13,7 +13,7 @@ func TestJSONClientVerifiesTLSByDefault(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := newJSONClient(server.URL, time.Second, false)
+	client, err := newJSONClient(server.URL, time.Second, false, nil)
 	if err != nil {
 		t.Fatalf("newJSONClient() error = %v", err)
 	}
@@ -29,7 +29,7 @@ func TestJSONClientCanSkipTLSVerification(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := newJSONClient(server.URL, time.Second, true)
+	client, err := newJSONClient(server.URL, time.Second, true, nil)
 	if err != nil {
 		t.Fatalf("newJSONClient() error = %v", err)
 	}

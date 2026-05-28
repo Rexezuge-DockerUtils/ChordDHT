@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"chorddht/internal/auth"
 	"chorddht/internal/chord"
 	"chorddht/internal/client"
 	"chorddht/internal/config"
@@ -24,11 +29,104 @@ func main() {
 	if err := logging.SetLevel(cfg.LogLevel); err != nil {
 		log.Fatalf("invalid log level: %v", err)
 	}
-	logging.Infof("starting node uri=%s listen=%s tracker_configured=%t manual_seeds=%d log_level=%s", cfg.NodeURI, cfg.ListenAddr, cfg.TrackerURL != "", len(cfg.ManualSeeds), cfg.LogLevel)
+	logging.Infof("starting node uri=%s listen=%s tracker_configured=%t manual_seeds=%d log_level=%s auth=%t",
+		cfg.NodeURI, cfg.ListenAddr, cfg.TrackerURL != "", len(cfg.ManualSeeds), cfg.LogLevel, cfg.Auth.Enabled)
 	if cfg.SkipTLSVerify {
 		logging.Warnf("outbound TLS certificate verification is disabled")
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// --- Auth setup ---
+	var signer *auth.RequestSigner
+	var verifier *auth.RequestVerifier
+	chordOpts := cfg.ChordOptions()
+
+	if cfg.Auth.Enabled {
+		caPubKeyBytes, err := base64.RawURLEncoding.DecodeString(cfg.Auth.CAPublicKeyBase64)
+		if err != nil || len(caPubKeyBytes) != 32 {
+			log.Fatalf("invalid auth.ca-public-key-base64: must be base64url-encoded 32-byte Ed25519 key")
+		}
+		caPubKey := ed25519.PublicKey(caPubKeyBytes)
+
+		certData, err := os.ReadFile(cfg.Auth.NodeCertificateFile)
+		if err != nil {
+			log.Fatalf("read node certificate: %v", err)
+		}
+		nodeCert, err := auth.ParseCertificate(certData)
+		if err != nil {
+			log.Fatalf("parse node certificate: %v", err)
+		}
+		if err := auth.VerifyCertificate(nodeCert, caPubKey, time.Now(), cfg.Auth.TimestampToleranceSecs); err != nil {
+			log.Fatalf("node certificate invalid: %v", err)
+		}
+		if nodeCert.IsExpiringSoon(time.Now(), cfg.Auth.CertExpiryWarnDays) {
+			logging.Warnf("node certificate expires soon expires_at=%d", nodeCert.ExpiresAt)
+		}
+
+		privKeyRaw, err := os.ReadFile(cfg.Auth.NodePrivateKeyFile)
+		if err != nil {
+			log.Fatalf("read node private key: %v", err)
+		}
+		privKeyBytes, err := base64.RawURLEncoding.DecodeString(string(privKeyRaw))
+		if err != nil || len(privKeyBytes) != 64 {
+			log.Fatalf("invalid node private key: must be base64url-encoded 64-byte Ed25519 private key")
+		}
+		privKey := ed25519.PrivateKey(privKeyBytes)
+
+		signer = auth.NewRequestSigner(nodeCert.NodeID, privKey, nodeCert)
+
+		nonceCache := auth.NewNonceCache(
+			time.Duration(cfg.Auth.NonceCacheTTLSecs)*time.Second,
+			cfg.Auth.NonceCacheMaxSize,
+		)
+		nonceCache.StartCleanup(ctx)
+
+		certCache := auth.NewCertCache(time.Duration(cfg.Auth.CertCacheTTLSecs) * time.Second)
+
+		var initialCRL *auth.CRL
+		if cfg.Auth.CRLFile != "" {
+			initialCRL, err = auth.LoadCRLFromFile(cfg.Auth.CRLFile, caPubKey)
+			if err != nil {
+				log.Fatalf("load crl file: %v", err)
+			}
+			logging.Infof("loaded CRL from file revoked_count=%d", len(initialCRL.RevokedIDs))
+		}
+
+		var gracePeriodEnd time.Time
+		if cfg.Auth.BootGracePeriodSecs > 0 {
+			gracePeriodEnd = time.Now().Add(time.Duration(cfg.Auth.BootGracePeriodSecs) * time.Second)
+		}
+
+		verifierCfg := auth.VerifierConfig{
+			CAPublicKey:        caPubKey,
+			TimestampTolerance: time.Duration(cfg.Auth.TimestampToleranceSecs) * time.Second,
+			NonceCache:         nonceCache,
+			CertCache:          certCache,
+			ToleranceSecs:      cfg.Auth.TimestampToleranceSecs,
+			BootGracePeriodEnd: gracePeriodEnd,
+		}
+		verifier = auth.NewRequestVerifier(verifierCfg, initialCRL)
+
+		// Store cert JSON in ChordOptions so node can attach it to join/notify/register.
+		chordOpts.NodeCertificate, _ = json.Marshal(nodeCert)
+		chordOpts.NodeCertExpiresAt = signer.CertExpiresAt()
+
+		if cfg.Auth.CRLRefreshFromTracker {
+			chordOpts.OnCRLRefresh = func(crlJSON []byte) {
+				crl, err := auth.ParseCRL(crlJSON, caPubKey)
+				if err != nil {
+					logging.Warnf("crl refresh failed: %v", err)
+					return
+				}
+				verifier.SetCRL(crl)
+				logging.Debugf("crl updated from tracker version=%d revoked=%d", crl.Version, len(crl.RevokedIDs))
+			}
+		}
+	}
+
+	// --- Tracker ---
 	var tracker chord.TrackerClient
 	if cfg.TrackerURL != "" {
 		logging.Infof("using tracker url=%s", cfg.TrackerURL)
@@ -41,8 +139,8 @@ func main() {
 		logging.Infof("tracker disabled")
 	}
 
-	peerClient := client.NewChordClient(cfg.HTTPTimeout, cfg.SkipTLSVerify)
-	node, err := chord.NewNode(cfg.NodeURI, cfg.ChordOptions(), peerClient, tracker)
+	peerClient := client.NewChordClient(cfg.HTTPTimeout, cfg.SkipTLSVerify, signer)
+	node, err := chord.NewNode(cfg.NodeURI, chordOpts, peerClient, tracker)
 	if err != nil {
 		log.Fatalf("failed to initialize node: %v", err)
 	}
@@ -60,11 +158,9 @@ func main() {
 		log.Fatalf("join failed: %v", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go node.RunMaintenance(ctx)
 
-	server := &http.Server{Addr: cfg.ListenAddr, Handler: httpapi.NewServer(node).Handler()}
+	server := &http.Server{Addr: cfg.ListenAddr, Handler: httpapi.NewServer(node, verifier).Handler()}
 	go func() {
 		<-ctx.Done()
 		logging.Infof("shutdown started")

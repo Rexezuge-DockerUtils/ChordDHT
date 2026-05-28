@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"chorddht/internal/auth"
 	"chorddht/internal/chord"
 	"chorddht/internal/logging"
 )
@@ -19,9 +20,10 @@ import (
 type jsonClient struct {
 	baseURL string
 	http    *http.Client
+	signer  *auth.RequestSigner // nil when auth is disabled
 }
 
-func newJSONClient(baseURL string, timeout time.Duration, skipTLSVerify bool) (jsonClient, error) {
+func newJSONClient(baseURL string, timeout time.Duration, skipTLSVerify bool, signer *auth.RequestSigner) (jsonClient, error) {
 	normalized, err := chord.NormalizeURI(baseURL)
 	if err != nil {
 		return jsonClient{}, err
@@ -43,26 +45,53 @@ func newJSONClient(baseURL string, timeout time.Duration, skipTLSVerify bool) (j
 	return jsonClient{
 		baseURL: normalized,
 		http:    httpClient,
+		signer:  signer,
 	}, nil
 }
 
 func (c jsonClient) do(method, path string, in any, out any) error {
-	var body io.Reader
+	return c.doSigned(method, path, in, out, false)
+}
+
+// doSigned performs an HTTP request. If the client has a signer, auth headers are added.
+// When includeCert is true, X-Chord-Certificate is also added.
+func (c jsonClient) doSigned(method, path string, in any, out any, includeCert bool) error {
+	var bodyBytes []byte
 	if in != nil {
-		buf := &bytes.Buffer{}
-		if err := json.NewEncoder(buf).Encode(in); err != nil {
+		var err error
+		bodyBytes, err = json.Marshal(in)
+		if err != nil {
 			return err
 		}
-		body = buf
+		// json.Marshal omits trailing newline; add one to match json.Encoder behaviour.
+		bodyBytes = append(bodyBytes, '\n')
 	}
-	req, err := http.NewRequest(method, c.baseURL+path, body)
+
+	var bodyReader io.Reader
+	if bodyBytes != nil {
+		bodyReader = bytes.NewReader(bodyBytes)
+	}
+
+	req, err := http.NewRequest(method, c.baseURL+path, bodyReader)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
-	if in != nil {
+	if bodyBytes != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
+	if c.signer != nil {
+		if err := c.signer.Sign(req, bodyBytes); err != nil {
+			return fmt.Errorf("sign request: %w", err)
+		}
+		if includeCert {
+			if err := c.signer.AddCertHeader(req); err != nil {
+				return fmt.Errorf("add cert header: %w", err)
+			}
+		}
+	}
+
 	start := time.Now()
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -98,6 +127,12 @@ func decodeAPIError(resp *http.Response) error {
 		return chord.NewAPIError(resp.StatusCode, chord.ErrUpstream, fmt.Sprintf("upstream returned HTTP %d", resp.StatusCode))
 	}
 	return &chord.APIError{StatusCode: resp.StatusCode, Code: payload.Error.Code, Message: payload.Error.Message, Detail: payload.Error.Detail}
+}
+
+// isCertRequired reports whether err is a CERTIFICATE_REQUIRED API error.
+func isCertRequired(err error) bool {
+	var apiErr *chord.APIError
+	return errors.As(err, &apiErr) && apiErr.Code == chord.ErrCertificateRequired
 }
 
 func appendQuery(path string, values url.Values) string {

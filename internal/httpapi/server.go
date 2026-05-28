@@ -5,16 +5,18 @@ import (
 	"net/http"
 	"time"
 
+	"chorddht/internal/auth"
 	"chorddht/internal/chord"
 	"chorddht/internal/logging"
 )
 
 type Server struct {
-	node *chord.Node
+	node     *chord.Node
+	verifier *auth.RequestVerifier // nil when auth is disabled
 }
 
-func NewServer(node *chord.Node) *Server {
-	return &Server{node: node}
+func NewServer(node *chord.Node, verifier *auth.RequestVerifier) *Server {
+	return &Server{node: node, verifier: verifier}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -29,7 +31,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/chord/join", s.join)
 	mux.HandleFunc("/chord/leave", s.leave)
 	mux.HandleFunc("/chord/finger_table", s.fingerTable)
-	return logRequests(mux)
+
+	var handler http.Handler = mux
+	if s.verifier != nil {
+		exempt := map[string]bool{
+			"/chord/ping":     true,
+			"/chord/identity": true,
+		}
+		handler = s.verifier.Middleware(mux, exempt)
+	}
+	return logRequests(handler)
 }
 
 type statusRecorder struct {
@@ -114,6 +125,7 @@ func (s *Server) notify(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	s.cacheNodeCert(req.Node.Certificate)
 	resp, err := s.node.HandleNotify(req)
 	if err != nil {
 		writeError(w, err)
@@ -139,12 +151,25 @@ func (s *Server) join(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	s.cacheNodeCert(req.Node.Certificate)
 	resp, err := s.node.HandleJoin(req)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// cacheNodeCert stores a certificate from an incoming request body into the cert cache.
+func (s *Server) cacheNodeCert(raw json.RawMessage) {
+	if s.verifier == nil || len(raw) == 0 {
+		return
+	}
+	cert, err := auth.ParseCertificate(raw)
+	if err != nil {
+		return
+	}
+	s.verifier.CacheIncomingCert(cert)
 }
 
 func (s *Server) leave(w http.ResponseWriter, r *http.Request) {
