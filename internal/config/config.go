@@ -17,6 +17,7 @@ type Config struct {
 	ListenAddr          string
 	TLSCertFile         string
 	TLSKeyFile          string
+	SkipTLSVerify       bool
 	TrackerURL          string
 	ManualSeeds         []string
 	HTTPTimeout         time.Duration
@@ -35,6 +36,7 @@ func Load() (Config, error) {
 	flag.StringVar(&cfg.ListenAddr, "listen", env("NODE_LISTEN", ""), "TLS listen address, defaults to URI port")
 	flag.StringVar(&cfg.TLSCertFile, "tls-cert", env("NODE_TLS_CERT_FILE", ""), "TLS certificate file")
 	flag.StringVar(&cfg.TLSKeyFile, "tls-key", env("NODE_TLS_KEY_FILE", ""), "TLS private key file")
+	flag.BoolVar(&cfg.SkipTLSVerify, "skip-tls-verify", envBool("CHORD_SKIP_TLS_VERIFY", false), "skip outbound TLS certificate verification")
 	flag.StringVar(&cfg.TrackerURL, "tracker-url", env("TRACKER_URL", ""), "optional tracker https:// URI")
 	flag.StringVar(&seeds, "seeds", env("NODE_MANUAL_SEEDS", ""), "comma-separated manual seed https:// URIs")
 	flag.DurationVar(&cfg.HTTPTimeout, "http-timeout", envDuration("CHORD_HTTP_TIMEOUT_SECONDS", chord.DefaultHTTPTimeout), "HTTP request timeout")
@@ -102,6 +104,18 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
 	if err != nil {
 		return fallback
 	}

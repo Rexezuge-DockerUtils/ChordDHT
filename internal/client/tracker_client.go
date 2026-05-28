@@ -14,8 +14,8 @@ type TrackerClient struct {
 	endpoint jsonClient
 }
 
-func NewTrackerClient(baseURL string, timeout time.Duration) (*TrackerClient, error) {
-	endpoint, err := newJSONClient(baseURL, timeout)
+func NewTrackerClient(baseURL string, timeout time.Duration, skipTLSVerify bool) (*TrackerClient, error) {
+	endpoint, err := newJSONClient(baseURL, timeout, skipTLSVerify)
 	if err != nil {
 		return nil, err
 	}

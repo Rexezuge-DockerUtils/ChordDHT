@@ -8,18 +8,19 @@ import (
 )
 
 type ChordClient struct {
-	timeout time.Duration
+	timeout       time.Duration
+	skipTLSVerify bool
 }
 
-func NewChordClient(timeout time.Duration) *ChordClient {
-	return &ChordClient{timeout: timeout}
+func NewChordClient(timeout time.Duration, skipTLSVerify bool) *ChordClient {
+	return &ChordClient{timeout: timeout, skipTLSVerify: skipTLSVerify}
 }
 
 func (c *ChordClient) endpoint(uri string) (jsonClient, error) {
 	if err := requireHTTPSURI(uri); err != nil {
 		return jsonClient{}, err
 	}
-	return newJSONClient(uri, c.timeout)
+	return newJSONClient(uri, c.timeout, c.skipTLSVerify)
 }
 
 func (c *ChordClient) Ping(uri string) error {

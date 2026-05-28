@@ -23,14 +23,14 @@ func main() {
 
 	var tracker chord.TrackerClient
 	if cfg.TrackerURL != "" {
-		trackerClient, err := client.NewTrackerClient(cfg.TrackerURL, cfg.HTTPTimeout)
+		trackerClient, err := client.NewTrackerClient(cfg.TrackerURL, cfg.HTTPTimeout, cfg.SkipTLSVerify)
 		if err != nil {
 			log.Fatalf("invalid tracker URL: %v", err)
 		}
 		tracker = trackerClient
 	}
 
-	peerClient := client.NewChordClient(cfg.HTTPTimeout)
+	peerClient := client.NewChordClient(cfg.HTTPTimeout, cfg.SkipTLSVerify)
 	node, err := chord.NewNode(cfg.NodeURI, cfg.ChordOptions(), peerClient, tracker)
 	if err != nil {
 		log.Fatalf("failed to initialize node: %v", err)
