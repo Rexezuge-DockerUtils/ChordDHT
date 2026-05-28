@@ -13,6 +13,21 @@ import (
 	"chorddht/internal/logging"
 )
 
+type AuthConfig struct {
+	Enabled                bool
+	CAPublicKeyBase64      string
+	NodeCertificateFile    string
+	NodePrivateKeyFile     string
+	TimestampToleranceSecs int
+	NonceCacheTTLSecs      int
+	NonceCacheMaxSize      int
+	CertCacheTTLSecs       int
+	CRLFile                string
+	CRLRefreshFromTracker  bool
+	CertExpiryWarnDays     int
+	BootGracePeriodSecs    int
+}
+
 type Config struct {
 	NodeURI             string
 	ListenAddr          string
@@ -29,6 +44,7 @@ type Config struct {
 	SuspiciousThreshold int
 	FailedThreshold     int
 	TrackerSeedCount    int
+	Auth                AuthConfig
 }
 
 func Load() (Config, error) {
@@ -49,6 +65,18 @@ func Load() (Config, error) {
 	flag.IntVar(&cfg.SuspiciousThreshold, "suspicious-threshold", envInt("CHORD_SUSPICIOUS_THRESHOLD", chord.DefaultSuspiciousThreshold), "suspicious threshold")
 	flag.IntVar(&cfg.FailedThreshold, "failed-threshold", envInt("CHORD_FAILED_THRESHOLD", chord.DefaultFailedThreshold), "failed threshold")
 	flag.IntVar(&cfg.TrackerSeedCount, "tracker-seed-count", envInt("TRACKER_SEED_COUNT", chord.DefaultTrackerSeedCount), "tracker seed count")
+	flag.BoolVar(&cfg.Auth.Enabled, "auth.enabled", envBool("CHORD_AUTH_ENABLED", false), "enable node identity authentication")
+	flag.StringVar(&cfg.Auth.CAPublicKeyBase64, "auth.ca-public-key-base64", env("CHORD_AUTH_CA_PUBLIC_KEY_BASE64", ""), "CA Ed25519 public key (base64url)")
+	flag.StringVar(&cfg.Auth.NodeCertificateFile, "auth.node-certificate-file", env("CHORD_AUTH_NODE_CERT_FILE", ""), "node certificate JSON file")
+	flag.StringVar(&cfg.Auth.NodePrivateKeyFile, "auth.node-private-key-file", env("CHORD_AUTH_NODE_PRIVATE_KEY_FILE", ""), "node Ed25519 private key file (base64url)")
+	flag.IntVar(&cfg.Auth.TimestampToleranceSecs, "auth.timestamp-tolerance-secs", envInt("CHORD_AUTH_TIMESTAMP_TOLERANCE", 300), "request timestamp tolerance (seconds)")
+	flag.IntVar(&cfg.Auth.NonceCacheTTLSecs, "auth.nonce-cache-ttl-secs", envInt("CHORD_AUTH_NONCE_CACHE_TTL", 600), "nonce cache TTL (seconds)")
+	flag.IntVar(&cfg.Auth.NonceCacheMaxSize, "auth.nonce-cache-max-size", envInt("CHORD_AUTH_NONCE_CACHE_MAX_SIZE", 10000), "nonce cache max entries")
+	flag.IntVar(&cfg.Auth.CertCacheTTLSecs, "auth.cert-cache-ttl-secs", envInt("CHORD_AUTH_CERT_CACHE_TTL", 3600), "cert cache TTL (seconds)")
+	flag.StringVar(&cfg.Auth.CRLFile, "auth.crl-file", env("CHORD_AUTH_CRL_FILE", ""), "CRL JSON file path")
+	flag.BoolVar(&cfg.Auth.CRLRefreshFromTracker, "auth.crl-refresh-from-tracker", envBool("CHORD_AUTH_CRL_REFRESH", true), "auto-refresh CRL from tracker")
+	flag.IntVar(&cfg.Auth.CertExpiryWarnDays, "auth.cert-expiry-warn-days", envInt("CHORD_AUTH_CERT_EXPIRY_WARN", 30), "days before cert expiry to warn")
+	flag.IntVar(&cfg.Auth.BootGracePeriodSecs, "auth.boot-grace-period-secs", envInt("CHORD_AUTH_BOOT_GRACE", 0), "seconds after startup before auth is enforced")
 	flag.Parse()
 
 	normalized, err := chord.NormalizeURI(cfg.NodeURI)
@@ -83,6 +111,17 @@ func Load() (Config, error) {
 			return Config{}, err
 		}
 		cfg.ManualSeeds = append(cfg.ManualSeeds, normalizedSeed)
+	}
+	if cfg.Auth.Enabled {
+		if cfg.Auth.CAPublicKeyBase64 == "" {
+			return Config{}, errors.New("auth.ca-public-key-base64 is required when auth is enabled")
+		}
+		if cfg.Auth.NodeCertificateFile == "" {
+			return Config{}, errors.New("auth.node-certificate-file is required when auth is enabled")
+		}
+		if cfg.Auth.NodePrivateKeyFile == "" {
+			return Config{}, errors.New("auth.node-private-key-file is required when auth is enabled")
+		}
 	}
 	return cfg, nil
 }

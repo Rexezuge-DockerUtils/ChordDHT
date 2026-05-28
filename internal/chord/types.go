@@ -1,6 +1,9 @@
 package chord
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 const (
 	DefaultM                    = 160
@@ -34,11 +37,12 @@ const (
 )
 
 type NodeInfo struct {
-	NodeID   string    `json:"node_id"`
-	URI      string    `json:"uri"`
-	Status   Status    `json:"status,omitempty"`
-	JoinedAt time.Time `json:"joined_at,omitempty"`
-	LastSeen time.Time `json:"last_seen,omitempty"`
+	NodeID      string          `json:"node_id"`
+	URI         string          `json:"uri"`
+	Status      Status          `json:"status,omitempty"`
+	JoinedAt    time.Time       `json:"joined_at,omitempty"`
+	LastSeen    time.Time       `json:"last_seen,omitempty"`
+	Certificate json.RawMessage `json:"certificate,omitempty"`
 }
 
 func (n NodeInfo) Core() NodeInfo {
@@ -134,6 +138,7 @@ type TrackerHeartbeat struct {
 	FingerTableCoverage float64 `json:"finger_table_coverage"`
 	UptimeSeconds       int64   `json:"uptime_seconds"`
 	MaintenanceCycles   uint64  `json:"maintenance_cycles"`
+	CertExpiresAt       *int64  `json:"cert_expires_at,omitempty"`
 }
 
 type PeerClient interface {
@@ -151,4 +156,5 @@ type TrackerClient interface {
 	Register(node NodeInfo) error
 	Deregister(nodeID string) error
 	Heartbeat(nodeID string, heartbeat TrackerHeartbeat) error
+	FetchCRL() ([]byte, error)
 }

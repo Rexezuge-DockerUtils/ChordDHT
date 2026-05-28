@@ -12,6 +12,14 @@ const (
 	ErrUpstreamTimeout = "UPSTREAM_TIMEOUT"
 	ErrLoopDetected    = "LOOP_DETECTED"
 	ErrUpstream        = "UPSTREAM_ERROR"
+
+	ErrMissingAuthHeaders   = "MISSING_AUTH_HEADERS"
+	ErrTimestampOutOfWindow = "TIMESTAMP_OUT_OF_WINDOW"
+	ErrNonceReused          = "NONCE_REUSED"
+	ErrCertificateRequired  = "CERTIFICATE_REQUIRED"
+	ErrInvalidCertificate   = "INVALID_CERTIFICATE"
+	ErrCertificateRevoked   = "CERTIFICATE_REVOKED"
+	ErrInvalidSignature     = "INVALID_SIGNATURE"
 )
 
 type APIError struct {

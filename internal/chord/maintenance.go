@@ -86,7 +86,9 @@ func (n *Node) Stabilize() {
 				return
 			}
 			successor := pred.Core()
-			_, _ = n.client.Notify(successor.URI, NotifyRequest{Node: self})
+			selfWithCert := self
+			selfWithCert.Certificate = n.options.NodeCertificate
+			_, _ = n.client.Notify(successor.URI, NotifyRequest{Node: selfWithCert})
 			list := []NodeInfo{successor}
 			if resp, err := n.client.SuccessorList(successor.URI); err == nil {
 				list = append(list, resp.SuccessorList...)
@@ -118,7 +120,9 @@ func (n *Node) Stabilize() {
 		if predResp.Predecessor != nil && predResp.Predecessor.NodeID != self.NodeID && InRangeOpenOpen(predResp.Predecessor.NodeID, self.NodeID, candidate.NodeID) {
 			successor = predResp.Predecessor.Core()
 		}
-		_, _ = n.client.Notify(successor.URI, NotifyRequest{Node: self})
+		selfWithCert := self
+		selfWithCert.Certificate = n.options.NodeCertificate
+		_, _ = n.client.Notify(successor.URI, NotifyRequest{Node: selfWithCert})
 		list := []NodeInfo{successor}
 		if resp, err := n.client.SuccessorList(successor.URI); err == nil {
 			list = append(list, resp.SuccessorList...)
@@ -204,6 +208,7 @@ func (n *Node) ReportToTracker() {
 		FingerTableCoverage: n.fingerCoverageLocked(),
 		UptimeSeconds:       int64(time.Since(n.startedAt).Seconds()),
 		MaintenanceCycles:   n.maintenanceCycles.Load(),
+		CertExpiresAt:       n.options.NodeCertExpiresAt,
 	}
 	n.mu.RUnlock()
 	if err := n.tracker.Heartbeat(n.self.NodeID, heartbeat); err != nil {
@@ -217,6 +222,15 @@ func (n *Node) ReportToTracker() {
 		return
 	}
 	logging.Debugf("tracker heartbeat sent node_id=%s status=%s", n.self.NodeID, status)
+
+	if n.options.OnCRLRefresh != nil {
+		crlJSON, err := n.tracker.FetchCRL()
+		if err != nil {
+			logging.Debugf("crl fetch from tracker failed: %v", err)
+			return
+		}
+		n.options.OnCRLRefresh(crlJSON)
+	}
 }
 
 func (n *Node) GracefulLeave() {
