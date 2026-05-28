@@ -28,17 +28,20 @@ Key protocol parameters:
 
 ```
 cmd/node/           # Executable — starts an HTTPS Chord node
+internal/auth/      # v2.0 identity authentication (cert, signer, verifier, CRL, nonce/cert caches)
 internal/chord/     # Ring state, lookup, join/leave, stabilization, finger repair
 internal/httpapi/   # JSON HTTP wrapper around chord.Node
 internal/client/    # Outbound HTTP clients for peer and tracker
 internal/config/    # CLI flags + environment variable loading
 internal/logging/   # Levelled logger
+tools/ca/           # Standalone CA tool: gen-ca, issue, gen-crl subcommands
 ```
 
 ## Building
 
 ```sh
 go build ./cmd/node
+go build ./tools/ca   # CA tool for credential management
 ```
 
 Binaries for `linux/amd64` and `linux/arm64` are published as GitHub release artifacts on every `v*` tag.
@@ -108,20 +111,22 @@ All endpoints use `Content-Type: application/json`. Unknown fields in request bo
 
 ### Node API
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/chord/identity` | Node ID, URI, status, join time |
-| `GET` | `/chord/state` | Full Chord state: predecessor, successor, successor list, all 160 finger entries |
-| `GET` | `/chord/ping` | Liveness probe (must respond within 5 s) |
-| `POST` | `/chord/find_successor` | Iterative lookup — returns `found: true` + successor, or `found: false` + next hop |
-| `GET` | `/chord/predecessor` | Current predecessor (`null` if none) |
-| `POST` | `/chord/notify` | Predecessor candidate announcement |
-| `GET` | `/chord/successor_list` | Backup successor list (up to r=3 entries) |
-| `POST` | `/chord/join` | Bootstrap entry point for a joining node |
-| `POST` | `/chord/leave` | Graceful-leave notification from a departing neighbour |
-| `GET` | `/chord/finger_table` | All 160 finger entries with repair status |
+| Method | Path | Auth required | Description |
+|---|---|---|---|
+| `GET` | `/chord/identity` | No | Node ID, URI, status, join time |
+| `GET` | `/chord/state` | Yes | Full Chord state: predecessor, successor, successor list, all 160 finger entries |
+| `GET` | `/chord/ping` | No | Liveness probe (must respond within 5 s) |
+| `POST` | `/chord/find_successor` | Yes | Iterative lookup — returns `found: true` + successor, or `found: false` + next hop |
+| `GET` | `/chord/predecessor` | Yes | Current predecessor (`null` if none) |
+| `POST` | `/chord/notify` | Yes | Predecessor candidate announcement |
+| `GET` | `/chord/successor_list` | Yes | Backup successor list (up to r=3 entries) |
+| `POST` | `/chord/join` | Yes | Bootstrap entry point for a joining node |
+| `POST` | `/chord/leave` | Yes | Graceful-leave notification from a departing neighbour |
+| `GET` | `/chord/finger_table` | Yes | All 160 finger entries with repair status |
 
 `find_successor` uses **iterative** lookup: a node never chains HTTP calls internally. When the answer is not local it returns `{"found": false, "next_hop": {...}}` and the **caller** makes the next request. This keeps HTTP call depth at 1 regardless of ring size.
+
+The "Auth required" column applies only when `--auth.enabled` is set. With auth disabled (default) all endpoints are open.
 
 ### Error Responses
 
@@ -140,6 +145,13 @@ All endpoints use `Content-Type: application/json`. Unknown fields in request bo
 | 400 | `INVALID_REQUEST` | Malformed field (wrong `node_id` length, missing required field, unknown field) |
 | 404 | `NODE_NOT_FOUND` | Tracker lookup for unknown node ID |
 | 409 | `ID_COLLISION` | Joining node has same ID as an existing node |
+| 401 | `MISSING_AUTH_HEADERS` | Required `X-Chord-*` headers absent |
+| 401 | `TIMESTAMP_OUT_OF_WINDOW` | Request timestamp outside ±5-minute tolerance |
+| 401 | `NONCE_REUSED` | Nonce has already been seen (replay attempt) |
+| 401 | `CERTIFICATE_REQUIRED` | No cached cert for sender; retry with `X-Chord-Certificate` header |
+| 401 | `INVALID_CERTIFICATE` | CA signature check failed, cert expired, or URI mismatch |
+| 401 | `CERTIFICATE_REVOKED` | Sender's node_id appears in the CRL |
+| 401 | `INVALID_SIGNATURE` | Ed25519 request signature does not verify |
 | 503 | `NODE_ISOLATED` | `find_successor` received while isolated |
 | 503 | `MAX_HOPS_EXCEEDED` | `hop_count` reached 161 |
 | 503 | `NODE_LEAVING` | Any non-ping request while leaving |
@@ -150,25 +162,111 @@ This repo does **not** implement a tracker server — see [ChordDHT-Tracker](htt
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/tracker/nodes` | Register on join |
+| `POST` | `/tracker/nodes` | Register on join (includes certificate when auth is enabled) |
 | `DELETE` | `/tracker/nodes/{node_id}` | Deregister on graceful leave |
-| `GET` | `/tracker/nodes/seeds?count=N&exclude=...` | Fetch bootstrap seeds |
+| `GET` | `/tracker/nodes/seeds?count=N&exclude=...&include_cert=true` | Fetch bootstrap seeds |
 | `POST` | `/tracker/nodes/{node_id}/heartbeat` | Periodic heartbeat with ring statistics |
+| `GET` | `/tracker/crl` | Fetch latest CRL (polled each maintenance cycle when auth enabled) |
 
 ## NodeInfo Schema
 
 ```json
 {
-  "node_id": "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3",
-  "uri":     "https://node1.example.com",
-  "status":  "ACTIVE",
-  "joined_at": "2026-05-27T12:00:00Z"
+  "node_id":    "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3",
+  "uri":        "https://node1.example.com",
+  "status":     "ACTIVE",
+  "joined_at":  "2026-05-27T12:00:00Z",
+  "certificate": { "...": "present in join/notify bodies when auth is enabled" }
 }
 ```
 
 `node_id` is always `sha1(normalized_uri)` as a 40-character lowercase hex string. Use `chord.NewNodeInfoFromURI` in tests rather than writing IDs by hand.
 
 URI normalization rules: lowercase scheme and host, strip trailing slash, keep non-443 ports.
+
+## Authentication (v2.0)
+
+Node identity authentication is **opt-in** via `--auth.enabled`. When enabled, all node-to-node API calls (except `/chord/ping` and `/chord/identity`) require a valid Ed25519 request signature from a CA-issued certificate.
+
+### Scheme Overview
+
+- **You are the CA.** Your Ed25519 private key is the root of trust. Keep it offline.
+- Each node holds its own Ed25519 key pair and a CA-signed **certificate** (custom JSON, not X.509).
+- Every authenticated request carries four headers: `X-Chord-Node-ID`, `X-Chord-Timestamp`, `X-Chord-Nonce`, `X-Chord-Signature`.
+- The first request to a peer also sends `X-Chord-Certificate`; subsequent requests use the receiver's cert cache (1-hour TTL).
+- A **nonce cache** (10-minute TTL) prevents replay attacks.
+- An optional **CRL** (CA-signed JSON) allows certificate revocation; the node refreshes it from the tracker each maintenance cycle.
+
+### CA Tool
+
+```sh
+# 1. Generate CA key pair (one-time; keep CA_PRIVATE_KEY_BASE64 offline)
+go run ./tools/ca gen-ca
+
+# 2. Issue a certificate for each node
+go run ./tools/ca issue \
+  --ca-key=<CA_PRIVATE_KEY_BASE64> \
+  --uri=https://node1.example.com \
+  --days=365 \
+  --out-dir=./creds
+# Writes: <node_id>.cert.json  (distribute to node)
+#         <node_id>.privkey.b64 (distribute to node, keep secret)
+
+# 3. Generate / update a CRL
+go run ./tools/ca gen-crl \
+  --ca-key=<CA_PRIVATE_KEY_BASE64> \
+  --revoke=<node_id1>,<node_id2> \
+  --out=crl.json
+```
+
+### Authentication Flags
+
+| Flag | Env var | Default | Description |
+|---|---|---|---|
+| `-auth.enabled` | `CHORD_AUTH_ENABLED` | `false` | Enable v2.0 identity authentication |
+| `-auth.ca-public-key-base64` | `CHORD_AUTH_CA_PUBLIC_KEY_BASE64` | *(required if enabled)* | CA Ed25519 public key (base64url, 32 bytes) |
+| `-auth.node-certificate-file` | `CHORD_AUTH_NODE_CERT_FILE` | *(required if enabled)* | Path to node certificate JSON file |
+| `-auth.node-private-key-file` | `CHORD_AUTH_NODE_PRIVATE_KEY_FILE` | *(required if enabled)* | Path to node Ed25519 private key file (base64url, 64 bytes) |
+| `-auth.timestamp-tolerance-secs` | `CHORD_AUTH_TIMESTAMP_TOLERANCE` | `300` | Request timestamp tolerance (±seconds) |
+| `-auth.nonce-cache-ttl-secs` | `CHORD_AUTH_NONCE_CACHE_TTL` | `600` | Nonce cache TTL (seconds) |
+| `-auth.nonce-cache-max-size` | `CHORD_AUTH_NONCE_CACHE_MAX_SIZE` | `10000` | Max cached nonces; rejects all when full |
+| `-auth.cert-cache-ttl-secs` | `CHORD_AUTH_CERT_CACHE_TTL` | `3600` | Verified peer cert cache TTL (seconds) |
+| `-auth.crl-file` | `CHORD_AUTH_CRL_FILE` | *(none)* | Local CRL JSON file path (optional) |
+| `-auth.crl-refresh-from-tracker` | `CHORD_AUTH_CRL_REFRESH` | `true` | Poll tracker's `GET /tracker/crl` each maintenance cycle |
+| `-auth.cert-expiry-warn-days` | `CHORD_AUTH_CERT_EXPIRY_WARN` | `30` | Log WARN when cert expires within this many days |
+| `-auth.boot-grace-period-secs` | `CHORD_AUTH_BOOT_GRACE` | `0` | Seconds after startup before auth is enforced (mitigates nonce-cache restart window) |
+
+### Example: Starting a Node with Auth
+
+```sh
+node \
+  -uri          https://node1.example.com \
+  -tls-cert     /certs/tls.crt \
+  -tls-key      /certs/tls.key \
+  -tracker-url  https://tracker.example.com \
+  -auth.enabled \
+  -auth.ca-public-key-base64   <CA_PUBLIC_KEY_BASE64> \
+  -auth.node-certificate-file  /creds/<node_id>.cert.json \
+  -auth.node-private-key-file  /creds/<node_id>.privkey.b64
+```
+
+### Certificate Format
+
+Certificates are a custom lightweight JSON format (not X.509), signed by the CA over a canonical plaintext message:
+
+```json
+{
+  "version":    1,
+  "node_id":    "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3",
+  "uri":        "https://node1.example.com",
+  "public_key": "<base64url 32-byte Ed25519 public key>",
+  "issued_at":  1748390400,
+  "expires_at": 1779926400,
+  "signature":  "<base64url 64-byte CA Ed25519 signature>"
+}
+```
+
+`node_id` must equal `SHA1(normalized_uri)` — certificates cannot be transferred between nodes.
 
 ## Development
 
@@ -185,8 +283,11 @@ go test ./internal/client -run TestJSONClientCanSkipTLSVerification
 # Format changed files
 gofmt -w <files>
 
-# Build
+# Build node binary
 go build ./cmd/node
+
+# Build CA tool
+go build ./tools/ca
 ```
 
 CI runs `go test ./...` on every push and pull request to `main`. Releases publish static binaries for `linux/amd64` and `linux/arm64`.
