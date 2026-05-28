@@ -1,0 +1,260 @@
+package chord
+
+import (
+	"context"
+	"time"
+)
+
+func (n *Node) RunMaintenance(ctx context.Context) {
+	ticker := time.NewTicker(n.options.MaintenanceInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n.MaintenanceCycle()
+		}
+	}
+}
+
+func (n *Node) MaintenanceCycle() {
+	status := n.Self().Status
+	if status == StatusActive {
+		n.CheckPredecessor()
+		n.Stabilize()
+		n.FixFingers()
+		n.HealthCheckRing()
+		n.ReportToTracker()
+	} else if status == StatusIsolated {
+		n.tryRecoverFromIsolation()
+	}
+	n.mu.Lock()
+	now := time.Now().UTC()
+	n.lastMaintenanceAt = &now
+	n.mu.Unlock()
+	n.maintenanceCycles.Add(1)
+}
+
+func (n *Node) CheckPredecessor() {
+	n.mu.RLock()
+	pred := cloneNodePtr(n.predecessor)
+	n.mu.RUnlock()
+	if pred == nil || pred.NodeID == n.self.NodeID || n.client == nil {
+		return
+	}
+	if err := n.client.Ping(pred.URI); err != nil {
+		n.mu.Lock()
+		if n.predecessor != nil && n.predecessor.NodeID == pred.NodeID {
+			n.predecessor = nil
+		}
+		n.mu.Unlock()
+		return
+	}
+	n.markSuccess(pred.NodeID)
+}
+
+func (n *Node) Stabilize() {
+	n.mu.RLock()
+	self := n.self.Core()
+	status := n.status
+	candidates := append([]NodeInfo{n.successor}, n.successorList...)
+	n.mu.RUnlock()
+	if status != StatusActive {
+		return
+	}
+	candidates = dedupeNodes(candidates, "")
+	for _, candidate := range candidates {
+		if candidate.NodeID == self.NodeID {
+			n.mu.Lock()
+			n.successor = self
+			n.successorList = []NodeInfo{self}
+			n.mu.Unlock()
+			return
+		}
+		if n.client == nil {
+			break
+		}
+		predResp, err := n.client.Predecessor(candidate.URI)
+		if err != nil {
+			n.markFailure(candidate.NodeID)
+			continue
+		}
+		n.markSuccess(candidate.NodeID)
+		successor := candidate.Core()
+		if predResp.Predecessor != nil && predResp.Predecessor.NodeID != self.NodeID && InRangeOpenOpen(predResp.Predecessor.NodeID, self.NodeID, candidate.NodeID) {
+			successor = predResp.Predecessor.Core()
+		}
+		_, _ = n.client.Notify(successor.URI, NotifyRequest{Node: self})
+		list := []NodeInfo{successor}
+		if resp, err := n.client.SuccessorList(successor.URI); err == nil {
+			list = append(list, resp.SuccessorList...)
+		}
+		n.mu.Lock()
+		n.successor = successor
+		n.successorList = n.mergeSuccessorListLocked(successor, list)
+		n.fingers[0].Node = successor
+		n.fingers[0].Status = FingerOK
+		n.mu.Unlock()
+		return
+	}
+	n.mu.Lock()
+	n.status = StatusIsolated
+	n.predecessor = nil
+	n.successor = self
+	n.successorList = []NodeInfo{self}
+	n.mu.Unlock()
+}
+
+func (n *Node) FixFingers() {
+	n.mu.RLock()
+	index := n.nextFingerIndex
+	start := n.fingers[index].Start
+	n.mu.RUnlock()
+	successor, err := n.LookupSuccessor(start)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if err == nil {
+		n.fingers[index].Node = successor.Core()
+		n.fingers[index].Status = FingerOK
+	} else if n.fingers[index].Status == FingerOK {
+		n.fingers[index].Status = FingerSuspicious
+	}
+	n.nextFingerIndex = (index + 1) % DefaultM
+}
+
+func (n *Node) HealthCheckRing() {
+	n.mu.RLock()
+	successors := cloneNodes(n.successorList)
+	selfID := n.self.NodeID
+	n.mu.RUnlock()
+	if n.client == nil {
+		return
+	}
+	for _, node := range successors {
+		if node.NodeID == selfID {
+			continue
+		}
+		if err := n.client.Ping(node.URI); err != nil {
+			n.markFailure(node.NodeID)
+		} else {
+			n.markSuccess(node.NodeID)
+		}
+	}
+}
+
+func (n *Node) ReportToTracker() {
+	if n.tracker == nil {
+		return
+	}
+	n.mu.RLock()
+	status := n.status
+	successorID := stringPtrIfNotEmpty(n.successor.NodeID)
+	var predecessorID *string
+	if n.predecessor != nil {
+		predecessorID = stringPtrIfNotEmpty(n.predecessor.NodeID)
+	}
+	heartbeat := TrackerHeartbeat{
+		Status:              status,
+		SuccessorID:         successorID,
+		PredecessorID:       predecessorID,
+		SuccessorListSize:   len(n.successorList),
+		FingerTableCoverage: n.fingerCoverageLocked(),
+		UptimeSeconds:       int64(time.Since(n.startedAt).Seconds()),
+		MaintenanceCycles:   n.maintenanceCycles.Load(),
+	}
+	n.mu.RUnlock()
+	_ = n.tracker.Heartbeat(n.self.NodeID, heartbeat)
+}
+
+func (n *Node) GracefulLeave() {
+	n.mu.Lock()
+	n.status = StatusLeaving
+	self := n.self.Core()
+	successor := n.successor
+	predecessor := cloneNodePtr(n.predecessor)
+	n.mu.Unlock()
+	if n.client != nil {
+		if successor.NodeID != "" && successor.NodeID != self.NodeID {
+			_ = n.client.Leave(successor.URI, LeaveRequest{Role: "predecessor_leaving", NewPredecessor: predecessor})
+		}
+		if predecessor != nil && predecessor.NodeID != self.NodeID {
+			_ = n.client.Leave(predecessor.URI, LeaveRequest{Role: "successor_leaving", NewSuccessor: &successor})
+		}
+	}
+	if n.tracker != nil {
+		_ = n.tracker.Deregister(self.NodeID)
+	}
+}
+
+func (n *Node) tryRecoverFromIsolation() {
+	if n.tracker == nil {
+		n.ActivateSingleNode()
+		return
+	}
+	seeds, err := n.tracker.Seeds(n.options.TrackerSeedCount, []string{n.self.NodeID})
+	if err != nil || len(seeds) == 0 {
+		n.ActivateSingleNode()
+		return
+	}
+	_ = n.JoinNetwork(seeds)
+}
+
+func (n *Node) markFailure(nodeID string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.failures[nodeID]++
+	if n.failures[nodeID] >= n.options.FailedThreshold && n.options.FailedThreshold > 0 {
+		for i := range n.fingers {
+			if n.fingers[i].Node.NodeID == nodeID {
+				n.fingers[i].Node = n.self.Core()
+				n.fingers[i].Status = FingerUnknown
+			}
+		}
+		filtered := n.successorList[:0]
+		for _, node := range n.successorList {
+			if node.NodeID != nodeID {
+				filtered = append(filtered, node)
+			}
+		}
+		n.successorList = filtered
+		return
+	}
+	for i := range n.fingers {
+		if n.fingers[i].Node.NodeID == nodeID {
+			n.fingers[i].Status = FingerSuspicious
+		}
+	}
+}
+
+func (n *Node) markSuccess(nodeID string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	delete(n.failures, nodeID)
+	for i := range n.fingers {
+		if n.fingers[i].Node.NodeID == nodeID {
+			n.fingers[i].Status = FingerOK
+		}
+	}
+}
+
+func (n *Node) fingerCoverageLocked() float64 {
+	if len(n.fingers) == 0 {
+		return 0
+	}
+	ok := 0
+	for _, finger := range n.fingers {
+		if finger.Status == FingerOK {
+			ok++
+		}
+	}
+	return float64(ok) / float64(len(n.fingers))
+}
+
+func stringPtrIfNotEmpty(value string) *string {
+	if value == "" {
+		return nil
+	}
+	copy := value
+	return &copy
+}
