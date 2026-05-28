@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,7 +20,7 @@ type jsonClient struct {
 	http    *http.Client
 }
 
-func newJSONClient(baseURL string, timeout time.Duration) (jsonClient, error) {
+func newJSONClient(baseURL string, timeout time.Duration, skipTLSVerify bool) (jsonClient, error) {
 	normalized, err := chord.NormalizeURI(baseURL)
 	if err != nil {
 		return jsonClient{}, err
@@ -27,14 +28,20 @@ func newJSONClient(baseURL string, timeout time.Duration) (jsonClient, error) {
 	if timeout <= 0 {
 		timeout = chord.DefaultHTTPTimeout
 	}
+	httpClient := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	if skipTLSVerify {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		httpClient.Transport = transport
+	}
 	return jsonClient{
 		baseURL: normalized,
-		http: &http.Client{
-			Timeout: timeout,
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		http:    httpClient,
 	}, nil
 }
 
