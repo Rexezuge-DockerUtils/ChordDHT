@@ -70,10 +70,33 @@ func (n *Node) Stabilize() {
 	candidates = dedupeNodes(candidates, "")
 	for _, candidate := range candidates {
 		if candidate.NodeID == self.NodeID {
+			// If we have a predecessor, use it to bootstrap our successor pointer.
+			// Per Chord: InRangeOpenOpen(pred, self, self) == true for any pred != self,
+			// so the predecessor is the correct next successor candidate.
+			// Without this, a seed node's successor stays "self" forever after others join.
+			n.mu.RLock()
+			pred := cloneNodePtr(n.predecessor)
+			n.mu.RUnlock()
+			if pred == nil || pred.NodeID == self.NodeID || n.client == nil {
+				n.mu.Lock()
+				n.successor = self
+				n.successorList = []NodeInfo{self}
+				n.mu.Unlock()
+				return
+			}
+			successor := pred.Core()
+			_, _ = n.client.Notify(successor.URI, NotifyRequest{Node: self})
+			list := []NodeInfo{successor}
+			if resp, err := n.client.SuccessorList(successor.URI); err == nil {
+				list = append(list, resp.SuccessorList...)
+			}
 			n.mu.Lock()
-			n.successor = self
-			n.successorList = []NodeInfo{self}
+			n.successor = successor
+			n.successorList = n.mergeSuccessorListLocked(successor, list)
+			n.fingers[0].Node = successor
+			n.fingers[0].Status = FingerOK
 			n.mu.Unlock()
+			logging.Infof("successor bootstrapped from predecessor successor=%s", successor.NodeID)
 			return
 		}
 		if n.client == nil {
