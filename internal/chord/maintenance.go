@@ -2,6 +2,7 @@ package chord
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"chorddht/internal/logging"
@@ -206,6 +207,12 @@ func (n *Node) ReportToTracker() {
 	}
 	n.mu.RUnlock()
 	if err := n.tracker.Heartbeat(n.self.NodeID, heartbeat); err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.Code == ErrNodeNotFound {
+			logging.Warnf("tracker heartbeat node not found, re-registering node_id=%s", n.self.NodeID)
+			n.registerTracker()
+			return
+		}
 		logging.Warnf("tracker heartbeat failed node_id=%s error=%v", n.self.NodeID, err)
 		return
 	}
