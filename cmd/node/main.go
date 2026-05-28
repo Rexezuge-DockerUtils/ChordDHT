@@ -13,6 +13,7 @@ import (
 	"chorddht/internal/client"
 	"chorddht/internal/config"
 	"chorddht/internal/httpapi"
+	"chorddht/internal/logging"
 )
 
 func main() {
@@ -20,14 +21,24 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid configuration: %v", err)
 	}
+	if err := logging.SetLevel(cfg.LogLevel); err != nil {
+		log.Fatalf("invalid log level: %v", err)
+	}
+	logging.Infof("starting node uri=%s listen=%s tracker_configured=%t manual_seeds=%d log_level=%s", cfg.NodeURI, cfg.ListenAddr, cfg.TrackerURL != "", len(cfg.ManualSeeds), cfg.LogLevel)
+	if cfg.SkipTLSVerify {
+		logging.Warnf("outbound TLS certificate verification is disabled")
+	}
 
 	var tracker chord.TrackerClient
 	if cfg.TrackerURL != "" {
+		logging.Infof("using tracker url=%s", cfg.TrackerURL)
 		trackerClient, err := client.NewTrackerClient(cfg.TrackerURL, cfg.HTTPTimeout, cfg.SkipTLSVerify)
 		if err != nil {
 			log.Fatalf("invalid tracker URL: %v", err)
 		}
 		tracker = trackerClient
+	} else {
+		logging.Infof("tracker disabled")
 	}
 
 	peerClient := client.NewChordClient(cfg.HTTPTimeout, cfg.SkipTLSVerify)
@@ -56,11 +67,15 @@ func main() {
 	server := &http.Server{Addr: cfg.ListenAddr, Handler: httpapi.NewServer(node).Handler()}
 	go func() {
 		<-ctx.Done()
+		logging.Infof("shutdown started")
 		node.GracefulLeave()
-		_ = server.Shutdown(context.Background())
+		if err := server.Shutdown(context.Background()); err != nil {
+			logging.Warnf("server shutdown failed: %v", err)
+		}
+		logging.Infof("shutdown completed")
 	}()
 
-	log.Printf("node %s listening on %s as %s", node.Self().NodeID, cfg.ListenAddr, cfg.NodeURI)
+	logging.Infof("node %s listening on %s as %s", node.Self().NodeID, cfg.ListenAddr, cfg.NodeURI)
 	if err := server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server failed: %v", err)
 	}

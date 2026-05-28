@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"chorddht/internal/chord"
+	"chorddht/internal/logging"
 )
 
 type Config struct {
@@ -18,6 +19,7 @@ type Config struct {
 	TLSCertFile         string
 	TLSKeyFile          string
 	SkipTLSVerify       bool
+	LogLevel            string
 	TrackerURL          string
 	ManualSeeds         []string
 	HTTPTimeout         time.Duration
@@ -37,6 +39,7 @@ func Load() (Config, error) {
 	flag.StringVar(&cfg.TLSCertFile, "tls-cert", env("NODE_TLS_CERT_FILE", ""), "TLS certificate file")
 	flag.StringVar(&cfg.TLSKeyFile, "tls-key", env("NODE_TLS_KEY_FILE", ""), "TLS private key file")
 	flag.BoolVar(&cfg.SkipTLSVerify, "skip-tls-verify", envBool("CHORD_SKIP_TLS_VERIFY", false), "skip outbound TLS certificate verification")
+	flag.StringVar(&cfg.LogLevel, "log-level", env("CHORD_LOG_LEVEL", "info"), "log level: debug, info, warn, error")
 	flag.StringVar(&cfg.TrackerURL, "tracker-url", env("TRACKER_URL", ""), "optional tracker https:// URI")
 	flag.StringVar(&seeds, "seeds", env("NODE_MANUAL_SEEDS", ""), "comma-separated manual seed https:// URIs")
 	flag.DurationVar(&cfg.HTTPTimeout, "http-timeout", envDuration("CHORD_HTTP_TIMEOUT_SECONDS", chord.DefaultHTTPTimeout), "HTTP request timeout")
@@ -58,6 +61,10 @@ func Load() (Config, error) {
 	}
 	if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
 		return Config{}, errors.New("strict https mode requires -tls-cert and -tls-key")
+	}
+	cfg.LogLevel, err = logging.NormalizeLevel(cfg.LogLevel)
+	if err != nil {
+		return Config{}, err
 	}
 	if cfg.TrackerURL != "" {
 		tracker, err := chord.NormalizeURI(cfg.TrackerURL)

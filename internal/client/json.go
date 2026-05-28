@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"chorddht/internal/chord"
+	"chorddht/internal/logging"
 )
 
 type jsonClient struct {
@@ -62,18 +63,27 @@ func (c jsonClient) do(method, path string, in any, out any) error {
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	start := time.Now()
 	resp, err := c.http.Do(req)
 	if err != nil {
+		logging.Warnf("outbound request failed method=%s url=%s error=%v duration=%s", method, req.URL.String(), err, time.Since(start))
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
+		logging.Warnf("outbound request returned error method=%s url=%s status=%d duration=%s", method, req.URL.String(), resp.StatusCode, time.Since(start))
 		return decodeAPIError(resp)
 	}
 	if out == nil {
+		logging.Debugf("outbound request completed method=%s url=%s status=%d duration=%s", method, req.URL.String(), resp.StatusCode, time.Since(start))
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		logging.Warnf("outbound response decode failed method=%s url=%s status=%d error=%v duration=%s", method, req.URL.String(), resp.StatusCode, err, time.Since(start))
+		return err
+	}
+	logging.Debugf("outbound request completed method=%s url=%s status=%d duration=%s", method, req.URL.String(), resp.StatusCode, time.Since(start))
+	return nil
 }
 
 func decodeAPIError(resp *http.Response) error {

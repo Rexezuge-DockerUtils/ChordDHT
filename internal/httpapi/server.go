@@ -3,8 +3,10 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"chorddht/internal/chord"
+	"chorddht/internal/logging"
 )
 
 type Server struct {
@@ -27,7 +29,31 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/chord/join", s.join)
 	mux.HandleFunc("/chord/leave", s.leave)
 	mux.HandleFunc("/chord/finger_table", s.fingerTable)
-	return mux
+	return logRequests(mux)
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		duration := time.Since(start)
+		if recorder.status >= http.StatusBadRequest {
+			logging.Warnf("http request method=%s path=%s status=%d remote=%s duration=%s", r.Method, r.URL.Path, recorder.status, r.RemoteAddr, duration)
+			return
+		}
+		logging.Debugf("http request method=%s path=%s status=%d remote=%s duration=%s", r.Method, r.URL.Path, recorder.status, r.RemoteAddr, duration)
+	})
 }
 
 func (s *Server) identity(w http.ResponseWriter, r *http.Request) {

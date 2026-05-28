@@ -1,6 +1,10 @@
 package chord
 
-import "net/http"
+import (
+	"net/http"
+
+	"chorddht/internal/logging"
+)
 
 func (n *Node) HandleJoin(req JoinRequest) (JoinResponse, error) {
 	if err := ValidateNodeInfo(req.Node); err != nil {
@@ -23,6 +27,7 @@ func (n *Node) HandleJoin(req JoinRequest) (JoinResponse, error) {
 	if err != nil {
 		return JoinResponse{}, err
 	}
+	logging.Infof("accepted join request node_id=%s successor=%s", req.Node.NodeID, successor.NodeID)
 	return JoinResponse{Successor: successor.Core(), SuccessorList: n.successorListFor(successor)}, nil
 }
 
@@ -37,9 +42,18 @@ func (n *Node) HandleNotify(req NotifyRequest) (NotifyResponse, error) {
 	}
 	accepted := false
 	candidate := req.Node.Core()
+	var previousPredecessor string
+	if n.predecessor != nil {
+		previousPredecessor = n.predecessor.NodeID
+	}
 	if candidate.NodeID != n.self.NodeID && (n.predecessor == nil || InRangeOpenOpen(candidate.NodeID, n.predecessor.NodeID, n.self.NodeID)) {
 		n.predecessor = &candidate
 		accepted = true
+	}
+	if accepted {
+		logging.Infof("accepted predecessor notification from=%s previous=%s", candidate.NodeID, previousPredecessor)
+	} else {
+		logging.Debugf("rejected predecessor notification from=%s current=%s", candidate.NodeID, previousPredecessor)
 	}
 	return NotifyResponse{Accepted: accepted, Predecessor: cloneNodePtr(n.predecessor)}, nil
 }
@@ -49,16 +63,23 @@ func (n *Node) HandleLeave(req LeaveRequest) (LeaveResponse, error) {
 	defer n.mu.Unlock()
 	switch req.Role {
 	case "predecessor_leaving":
+		previous := ""
+		if n.predecessor != nil {
+			previous = n.predecessor.NodeID
+		}
 		if req.NewPredecessor != nil {
 			n.predecessor = cloneNodePtr(req.NewPredecessor)
 		} else {
 			n.predecessor = nil
 		}
+		logging.Infof("handled predecessor leave previous=%s", previous)
 	case "successor_leaving":
+		previous := n.successor.NodeID
 		if req.NewSuccessor != nil {
 			n.successor = req.NewSuccessor.Core()
 			n.successorList = n.mergeSuccessorListLocked(n.successor, n.successorList)
 		}
+		logging.Infof("handled successor leave previous=%s current=%s", previous, n.successor.NodeID)
 	default:
 		return LeaveResponse{}, NewAPIError(http.StatusBadRequest, ErrInvalidRequest, "unknown leave role")
 	}
