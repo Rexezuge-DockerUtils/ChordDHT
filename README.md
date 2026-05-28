@@ -4,6 +4,10 @@ A learning implementation of the [Chord](https://pdos.csail.mit.edu/papers/ton:c
 
 > **Scope:** Chord ring formation and O(log N) key routing only. No key-value storage. Not intended for production use.
 
+## Sister Project
+
+[**ChordDHT-Tracker**](https://github.com/Rexezuge-CloudflareWorkers/ChordDHT-Tracker) — the optional bootstrap tracker for this node, implemented as a Cloudflare Worker with a D1 database and a React ring-visualization dashboard.
+
 ## How It Works
 
 Every node maps its canonical HTTPS URI to a 160-bit ID via SHA-1 and joins a consistent-hash ring. Routing uses an iterative finger-table lookup that resolves any key in at most O(log N) hops. A 60-second maintenance cycle runs `check_predecessor → stabilize → fix_fingers → health_check_ring → report_to_tracker` to keep the ring self-healing.
@@ -140,7 +144,7 @@ All endpoints use `Content-Type: application/json`. Unknown fields in request bo
 
 ### Tracker API (external)
 
-This repo does **not** implement a tracker server. The node client calls these endpoints if `-tracker-url` is configured:
+This repo does **not** implement a tracker server — see [ChordDHT-Tracker](https://github.com/Rexezuge-CloudflareWorkers/ChordDHT-Tracker). The node client calls these endpoints if `-tracker-url` is configured:
 
 | Method | Path | Description |
 |---|---|---|
