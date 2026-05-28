@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"chorddht/internal/logging"
 )
 
 type Options struct {
@@ -176,7 +178,7 @@ func (n *Node) SuccessorList() SuccessorListResponse {
 
 func (n *Node) ActivateSingleNode() {
 	n.mu.Lock()
-	defer n.mu.Unlock()
+	selfID := n.self.NodeID
 	n.joinedAt = time.Now().UTC()
 	n.status = StatusActive
 	n.predecessor = nil
@@ -186,6 +188,8 @@ func (n *Node) ActivateSingleNode() {
 		n.fingers[i].Node = n.self.Core()
 		n.fingers[i].Status = FingerOK
 	}
+	n.mu.Unlock()
+	logging.Infof("node activated as single-node ring node_id=%s", selfID)
 }
 
 func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
@@ -194,16 +198,23 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 		trackerSeeds, err := n.tracker.Seeds(n.options.TrackerSeedCount, []string{n.self.NodeID})
 		if err == nil {
 			seeds = append(seeds, trackerSeeds...)
+			logging.Infof("tracker returned seeds count=%d", len(trackerSeeds))
+		} else {
+			logging.Warnf("tracker seed lookup failed: %v", err)
 		}
 	}
+	logging.Infof("manual seeds configured count=%d", len(manualSeeds))
 	seeds = append(seeds, manualSeeds...)
 	seeds = dedupeNodes(seeds, n.self.NodeID)
+	logging.Infof("joining network seeds=%d", len(seeds))
 
 	n.mu.Lock()
 	n.status = StatusJoining
 	n.mu.Unlock()
+	logging.Infof("node status changed status=%s", StatusJoining)
 
 	if len(seeds) == 0 || n.client == nil {
+		logging.Infof("no usable seeds found; activating single-node ring")
 		n.ActivateSingleNode()
 		n.registerTracker()
 		return nil
@@ -211,14 +222,22 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 
 	self := n.Self().Core()
 	for _, seed := range seeds {
-		if err := ValidateNodeInfo(seed); err != nil || seed.NodeID == self.NodeID {
+		if seed.NodeID == self.NodeID {
+			logging.Debugf("ignoring self seed node_id=%s uri=%s", seed.NodeID, seed.URI)
 			continue
 		}
+		if err := ValidateNodeInfo(seed); err != nil {
+			logging.Warnf("ignoring invalid seed node_id=%s uri=%s error=%v", seed.NodeID, seed.URI, err)
+			continue
+		}
+		logging.Debugf("attempting join via seed node_id=%s uri=%s", seed.NodeID, seed.URI)
 		resp, err := n.client.Join(seed.URI, JoinRequest{Node: self})
 		if err != nil {
+			logging.Warnf("join via seed failed node_id=%s uri=%s error=%v", seed.NodeID, seed.URI, err)
 			continue
 		}
 		if err := ValidateNodeInfo(resp.Successor); err != nil {
+			logging.Warnf("join via seed returned invalid successor seed_node_id=%s successor_node_id=%s successor_uri=%s error=%v", seed.NodeID, resp.Successor.NodeID, resp.Successor.URI, err)
 			continue
 		}
 		n.mu.Lock()
@@ -230,11 +249,13 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 		n.joinedAt = time.Now().UTC()
 		n.status = StatusActive
 		n.mu.Unlock()
+		logging.Infof("joined network via seed=%s successor=%s successor_list_size=%d", seed.NodeID, resp.Successor.NodeID, len(resp.SuccessorList))
 		_, _ = n.client.Notify(resp.Successor.URI, NotifyRequest{Node: self})
 		n.registerTracker()
 		return nil
 	}
 
+	logging.Warnf("all join attempts failed; activating single-node ring")
 	n.ActivateSingleNode()
 	n.registerTracker()
 	return nil
@@ -242,7 +263,12 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 
 func (n *Node) registerTracker() {
 	if n.tracker != nil {
-		_ = n.tracker.Register(n.Self().Core())
+		self := n.Self().Core()
+		if err := n.tracker.Register(self); err != nil {
+			logging.Warnf("tracker registration failed node_id=%s error=%v", self.NodeID, err)
+			return
+		}
+		logging.Infof("registered node with tracker node_id=%s", self.NodeID)
 	}
 }
 

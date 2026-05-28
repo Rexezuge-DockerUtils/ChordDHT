@@ -1,6 +1,10 @@
 package chord
 
-import "net/http"
+import (
+	"net/http"
+
+	"chorddht/internal/logging"
+)
 
 func (n *Node) HandleFindSuccessor(req FindSuccessorRequest) (FindSuccessorResponse, error) {
 	if !ValidateID(req.ID) {
@@ -34,13 +38,16 @@ func (n *Node) HandleFindSuccessor(req FindSuccessorRequest) (FindSuccessorRespo
 	}
 
 	if successor.NodeID == self.NodeID || InRangeOpenClosed(req.ID, self.NodeID, successor.NodeID) {
+		logging.Debugf("find_successor resolved locally target=%s successor=%s hop=%d", req.ID, successor.NodeID, req.HopCount)
 		return FindSuccessorResponse{Found: true, Successor: &successor, HopCount: req.HopCount}, nil
 	}
 
 	next := closestPrecedingNode(self, req.ID, fingers, successors)
 	if next.NodeID == self.NodeID {
+		logging.Debugf("find_successor falling back to successor target=%s successor=%s hop=%d", req.ID, successor.NodeID, req.HopCount)
 		return FindSuccessorResponse{Found: true, Successor: &successor, HopCount: req.HopCount}, nil
 	}
+	logging.Debugf("find_successor forwarding target=%s next_hop=%s hop=%d", req.ID, next.NodeID, req.HopCount+1)
 	return FindSuccessorResponse{Found: false, NextHop: &next, HopCount: req.HopCount + 1}, nil
 }
 
@@ -74,6 +81,7 @@ func (n *Node) LookupSuccessor(id string) (NodeInfo, error) {
 			if resp.Successor == nil {
 				return NodeInfo{}, NewAPIError(http.StatusServiceUnavailable, ErrUpstream, "find_successor response missing successor")
 			}
+			logging.Debugf("lookup resolved target=%s successor=%s hops=%d", id, resp.Successor.NodeID, hop)
 			return resp.Successor.Core(), nil
 		}
 		if resp.NextHop == nil {

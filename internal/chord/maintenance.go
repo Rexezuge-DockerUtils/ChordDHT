@@ -3,6 +3,8 @@ package chord
 import (
 	"context"
 	"time"
+
+	"chorddht/internal/logging"
 )
 
 func (n *Node) RunMaintenance(ctx context.Context) {
@@ -49,6 +51,7 @@ func (n *Node) CheckPredecessor() {
 			n.predecessor = nil
 		}
 		n.mu.Unlock()
+		logging.Warnf("predecessor lost node_id=%s uri=%s error=%v", pred.NodeID, pred.URI, err)
 		return
 	}
 	n.markSuccess(pred.NodeID)
@@ -58,6 +61,7 @@ func (n *Node) Stabilize() {
 	n.mu.RLock()
 	self := n.self.Core()
 	status := n.status
+	currentSuccessor := n.successor
 	candidates := append([]NodeInfo{n.successor}, n.successorList...)
 	n.mu.RUnlock()
 	if status != StatusActive {
@@ -77,7 +81,12 @@ func (n *Node) Stabilize() {
 		}
 		predResp, err := n.client.Predecessor(candidate.URI)
 		if err != nil {
-			n.markFailure(candidate.NodeID)
+			failures, evicted := n.markFailure(candidate.NodeID)
+			if evicted {
+				logging.Warnf("successor candidate evicted after failures node_id=%s uri=%s failures=%d error=%v", candidate.NodeID, candidate.URI, failures, err)
+			} else {
+				logging.Warnf("successor candidate failed node_id=%s uri=%s failures=%d error=%v", candidate.NodeID, candidate.URI, failures, err)
+			}
 			continue
 		}
 		n.markSuccess(candidate.NodeID)
@@ -96,6 +105,9 @@ func (n *Node) Stabilize() {
 		n.fingers[0].Node = successor
 		n.fingers[0].Status = FingerOK
 		n.mu.Unlock()
+		if successor.NodeID != currentSuccessor.NodeID {
+			logging.Infof("successor changed from=%s to=%s", currentSuccessor.NodeID, successor.NodeID)
+		}
 		return
 	}
 	n.mu.Lock()
@@ -104,6 +116,7 @@ func (n *Node) Stabilize() {
 	n.successor = self
 	n.successorList = []NodeInfo{self}
 	n.mu.Unlock()
+	logging.Warnf("node became isolated; no successor candidates reachable")
 }
 
 func (n *Node) FixFingers() {
@@ -136,7 +149,12 @@ func (n *Node) HealthCheckRing() {
 			continue
 		}
 		if err := n.client.Ping(node.URI); err != nil {
-			n.markFailure(node.NodeID)
+			failures, evicted := n.markFailure(node.NodeID)
+			if evicted {
+				logging.Warnf("ring node evicted after health check failures node_id=%s uri=%s failures=%d error=%v", node.NodeID, node.URI, failures, err)
+			} else {
+				logging.Warnf("ring node health check failed node_id=%s uri=%s failures=%d error=%v", node.NodeID, node.URI, failures, err)
+			}
 		} else {
 			n.markSuccess(node.NodeID)
 		}
@@ -164,7 +182,11 @@ func (n *Node) ReportToTracker() {
 		MaintenanceCycles:   n.maintenanceCycles.Load(),
 	}
 	n.mu.RUnlock()
-	_ = n.tracker.Heartbeat(n.self.NodeID, heartbeat)
+	if err := n.tracker.Heartbeat(n.self.NodeID, heartbeat); err != nil {
+		logging.Warnf("tracker heartbeat failed node_id=%s error=%v", n.self.NodeID, err)
+		return
+	}
+	logging.Debugf("tracker heartbeat sent node_id=%s status=%s", n.self.NodeID, status)
 }
 
 func (n *Node) GracefulLeave() {
@@ -176,34 +198,54 @@ func (n *Node) GracefulLeave() {
 	n.mu.Unlock()
 	if n.client != nil {
 		if successor.NodeID != "" && successor.NodeID != self.NodeID {
-			_ = n.client.Leave(successor.URI, LeaveRequest{Role: "predecessor_leaving", NewPredecessor: predecessor})
+			if err := n.client.Leave(successor.URI, LeaveRequest{Role: "predecessor_leaving", NewPredecessor: predecessor}); err != nil {
+				logging.Warnf("failed to notify successor during leave node_id=%s error=%v", successor.NodeID, err)
+			} else {
+				logging.Infof("notified successor during leave node_id=%s", successor.NodeID)
+			}
 		}
 		if predecessor != nil && predecessor.NodeID != self.NodeID {
-			_ = n.client.Leave(predecessor.URI, LeaveRequest{Role: "successor_leaving", NewSuccessor: &successor})
+			if err := n.client.Leave(predecessor.URI, LeaveRequest{Role: "successor_leaving", NewSuccessor: &successor}); err != nil {
+				logging.Warnf("failed to notify predecessor during leave node_id=%s error=%v", predecessor.NodeID, err)
+			} else {
+				logging.Infof("notified predecessor during leave node_id=%s", predecessor.NodeID)
+			}
 		}
 	}
 	if n.tracker != nil {
-		_ = n.tracker.Deregister(self.NodeID)
+		if err := n.tracker.Deregister(self.NodeID); err != nil {
+			logging.Warnf("tracker deregistration failed node_id=%s error=%v", self.NodeID, err)
+		} else {
+			logging.Infof("deregistered node from tracker node_id=%s", self.NodeID)
+		}
 	}
 }
 
 func (n *Node) tryRecoverFromIsolation() {
 	if n.tracker == nil {
+		logging.Infof("recovering from isolation without tracker; activating single-node ring")
 		n.ActivateSingleNode()
 		return
 	}
 	seeds, err := n.tracker.Seeds(n.options.TrackerSeedCount, []string{n.self.NodeID})
 	if err != nil || len(seeds) == 0 {
+		if err != nil {
+			logging.Warnf("isolation recovery seed lookup failed: %v", err)
+		} else {
+			logging.Warnf("isolation recovery found no seeds")
+		}
 		n.ActivateSingleNode()
 		return
 	}
+	logging.Infof("attempting isolation recovery with seeds=%d", len(seeds))
 	_ = n.JoinNetwork(seeds)
 }
 
-func (n *Node) markFailure(nodeID string) {
+func (n *Node) markFailure(nodeID string) (int, bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.failures[nodeID]++
+	failures := n.failures[nodeID]
 	if n.failures[nodeID] >= n.options.FailedThreshold && n.options.FailedThreshold > 0 {
 		for i := range n.fingers {
 			if n.fingers[i].Node.NodeID == nodeID {
@@ -218,13 +260,14 @@ func (n *Node) markFailure(nodeID string) {
 			}
 		}
 		n.successorList = filtered
-		return
+		return failures, true
 	}
 	for i := range n.fingers {
 		if n.fingers[i].Node.NodeID == nodeID {
 			n.fingers[i].Status = FingerSuspicious
 		}
 	}
+	return failures, false
 }
 
 func (n *Node) markSuccess(nodeID string) {
