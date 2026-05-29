@@ -45,16 +45,17 @@ func (c *TrackerClient) Seeds(count int, exclude []string) ([]chord.NodeInfo, er
 }
 
 func (c *TrackerClient) Register(node chord.NodeInfo) error {
-	// Send the full NodeInfo including Certificate (if present) so the tracker
-	// can verify it and record cert_expires_at.
+	// Send the full NodeInfo including Certificate and Region (if present).
 	body := struct {
 		NodeID      string          `json:"node_id"`
 		URI         string          `json:"uri"`
 		Certificate json.RawMessage `json:"certificate,omitempty"`
+		Region      string          `json:"region,omitempty"`
 	}{
 		NodeID:      node.NodeID,
 		URI:         node.URI,
 		Certificate: node.Certificate,
+		Region:      node.Region,
 	}
 	return c.endpoint.do(http.MethodPost, "/tracker/nodes", body, nil)
 }

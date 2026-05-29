@@ -29,8 +29,8 @@ func main() {
 	if err := logging.SetLevel(cfg.LogLevel); err != nil {
 		log.Fatalf("invalid log level: %v", err)
 	}
-	logging.Infof("starting node uri=%s listen=%s tracker_configured=%t manual_seeds=%d log_level=%s auth=%t",
-		cfg.NodeURI, cfg.ListenAddr, cfg.TrackerURL != "", len(cfg.ManualSeeds), cfg.LogLevel, cfg.Auth.Enabled)
+	logging.Infof("starting node uri=%s listen=%s tracker_configured=%t manual_seeds=%d log_level=%s auth=%t region=%s",
+		cfg.NodeURI, cfg.ListenAddr, cfg.TrackerURL != "", len(cfg.ManualSeeds), cfg.LogLevel, cfg.Auth.Enabled, cfg.NodeRegion)
 	if cfg.SkipTLSVerify {
 		logging.Warnf("outbound TLS certificate verification is disabled")
 	}
@@ -140,6 +140,16 @@ func main() {
 	}
 
 	peerClient := client.NewChordClient(cfg.HTTPTimeout, cfg.SkipTLSVerify, signer)
+	peerClient.SetSelfRegion(cfg.NodeRegion)
+	peerClient.SetTimeoutConfig(client.TimeoutConfig{
+		PingSame:           cfg.TimeoutPingSameRegion,
+		PingCross:          cfg.TimeoutPingCrossRegion,
+		FindSuccessorSame:  cfg.TimeoutFindSuccessorSame,
+		FindSuccessorCross: cfg.TimeoutFindSuccessorCross,
+		FixFingersSame:     cfg.TimeoutFixFingersSame,
+		FixFingersCross:    cfg.TimeoutFixFingersCross,
+		Default:            cfg.HTTPTimeout,
+	})
 	node, err := chord.NewNode(cfg.NodeURI, chordOpts, peerClient, tracker)
 	if err != nil {
 		log.Fatalf("failed to initialize node: %v", err)

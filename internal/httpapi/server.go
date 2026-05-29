@@ -31,12 +31,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/chord/join", s.join)
 	mux.HandleFunc("/chord/leave", s.leave)
 	mux.HandleFunc("/chord/finger_table", s.fingerTable)
+	mux.HandleFunc("/chord/rtt", s.rtt)
+	mux.HandleFunc("/chord/status", s.nodeStatus)
 
 	var handler http.Handler = mux
 	if s.verifier != nil {
 		exempt := map[string]bool{
 			"/chord/ping":     true,
 			"/chord/identity": true,
+			"/chord/rtt":      true,
+			"/chord/status":   true,
 		}
 		handler = s.verifier.Middleware(mux, exempt)
 	}
@@ -196,6 +200,22 @@ func (s *Server) fingerTable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.node.FingerTable())
+}
+
+func (s *Server) rtt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.node.RTTData())
+}
+
+func (s *Server) nodeStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.node.NodeStatusInfo())
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) bool {

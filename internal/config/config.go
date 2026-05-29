@@ -13,6 +13,18 @@ import (
 	"chorddht/internal/logging"
 )
 
+func envFloat(key string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
 type AuthConfig struct {
 	Enabled                bool
 	CAPublicKeyBase64      string
@@ -45,6 +57,39 @@ type Config struct {
 	FailedThreshold     int
 	TrackerSeedCount    int
 	Auth                AuthConfig
+
+	// v3.0 fields
+	NodeRegion                         string
+	PredecessorListSize                int
+	FixFingersBatchSizeActive          int
+	FixFingersBatchSizeQuiet           int
+	RoutingCacheEnabled                bool
+	RoutingCacheSize                   int
+	RoutingCacheTTL                    time.Duration
+	LatencyWeightID                    float64
+	LatencyWeightRTT                   float64
+	LatencyWeightRegion                float64
+	ParallelLookupEnabled              bool
+	ParallelLookupCandidates           int
+	TimeoutPingSameRegion              time.Duration
+	TimeoutPingCrossRegion             time.Duration
+	TimeoutFindSuccessorSame           time.Duration
+	TimeoutFindSuccessorCross          time.Duration
+	TimeoutFixFingersSame              time.Duration
+	TimeoutFixFingersCross             time.Duration
+	LatencyProbeIntervalActive         time.Duration
+	LatencyProbeIntervalQuiet          time.Duration
+	RTTEWMAAlpha                       float64
+	RTTSampleExpiry                    time.Duration
+	PiggybackEnabled                   bool
+	StabilizeDebounceThreshold         int
+	TopologyChangeWindow               time.Duration
+	StabilizeActiveInterval            time.Duration
+	StabilizeQuietInterval             time.Duration
+	FixFingersActiveInterval           time.Duration
+	FixFingersQuietInterval            time.Duration
+	CheckPredecessorActiveInterval     time.Duration
+	CheckPredecessorQuietInterval      time.Duration
 }
 
 func Load() (Config, error) {
@@ -77,6 +122,39 @@ func Load() (Config, error) {
 	flag.BoolVar(&cfg.Auth.CRLRefreshFromTracker, "auth.crl-refresh-from-tracker", envBool("CHORD_AUTH_CRL_REFRESH", true), "auto-refresh CRL from tracker")
 	flag.IntVar(&cfg.Auth.CertExpiryWarnDays, "auth.cert-expiry-warn-days", envInt("CHORD_AUTH_CERT_EXPIRY_WARN", 30), "days before cert expiry to warn")
 	flag.IntVar(&cfg.Auth.BootGracePeriodSecs, "auth.boot-grace-period-secs", envInt("CHORD_AUTH_BOOT_GRACE", 0), "seconds after startup before auth is enforced")
+
+	// v3.0 flags
+	flag.StringVar(&cfg.NodeRegion, "node-region", env("CHORD_NODE_REGION", "default"), "node region label")
+	flag.IntVar(&cfg.PredecessorListSize, "predecessor-list-size", envInt("CHORD_PREDECESSOR_LIST_SIZE", chord.DefaultPredecessorListSize), "predecessor chain backup length")
+	flag.IntVar(&cfg.FixFingersBatchSizeActive, "fix-fingers-batch-active", envInt("CHORD_FIX_FINGERS_BATCH_ACTIVE", chord.DefaultFixFingersBatchSizeActive), "fingers repaired per cycle in active mode")
+	flag.IntVar(&cfg.FixFingersBatchSizeQuiet, "fix-fingers-batch-quiet", envInt("CHORD_FIX_FINGERS_BATCH_QUIET", chord.DefaultFixFingersBatchSizeQuiet), "fingers repaired per cycle in quiet mode")
+	flag.BoolVar(&cfg.RoutingCacheEnabled, "routing-cache-enabled", envBool("CHORD_ROUTING_CACHE_ENABLED", true), "enable LRU routing result cache")
+	flag.IntVar(&cfg.RoutingCacheSize, "routing-cache-size", envInt("CHORD_ROUTING_CACHE_SIZE", chord.DefaultRoutingCacheSize), "routing cache max entries")
+	flag.DurationVar(&cfg.RoutingCacheTTL, "routing-cache-ttl", envDuration("CHORD_ROUTING_CACHE_TTL_SECONDS", chord.DefaultRoutingCacheTTL), "routing cache TTL")
+	flag.Float64Var(&cfg.LatencyWeightID, "latency-weight-id", envFloat("CHORD_LATENCY_WEIGHT_ID", 0.6), "routing score weight for ID proximity")
+	flag.Float64Var(&cfg.LatencyWeightRTT, "latency-weight-rtt", envFloat("CHORD_LATENCY_WEIGHT_RTT", 0.3), "routing score weight for RTT")
+	flag.Float64Var(&cfg.LatencyWeightRegion, "latency-weight-region", envFloat("CHORD_LATENCY_WEIGHT_REGION", 0.1), "routing score weight for region affinity")
+	flag.BoolVar(&cfg.ParallelLookupEnabled, "parallel-lookup-enabled", envBool("CHORD_PARALLEL_LOOKUP_ENABLED", false), "enable parallel find_successor probing")
+	flag.IntVar(&cfg.ParallelLookupCandidates, "parallel-lookup-candidates", envInt("CHORD_PARALLEL_LOOKUP_CANDIDATES", 3), "parallel lookup candidate count")
+	flag.DurationVar(&cfg.TimeoutPingSameRegion, "timeout-ping-same", envDuration("CHORD_TIMEOUT_PING_SAME", chord.DefaultTimeoutPingSameRegion), "/ping timeout for same-region peers")
+	flag.DurationVar(&cfg.TimeoutPingCrossRegion, "timeout-ping-cross", envDuration("CHORD_TIMEOUT_PING_CROSS", chord.DefaultTimeoutPingCrossRegion), "/ping timeout for cross-region peers")
+	flag.DurationVar(&cfg.TimeoutFindSuccessorSame, "timeout-find-successor-same", envDuration("CHORD_TIMEOUT_FIND_SUCCESSOR_SAME", chord.DefaultTimeoutFindSuccessorSame), "/find_successor timeout for same-region peers")
+	flag.DurationVar(&cfg.TimeoutFindSuccessorCross, "timeout-find-successor-cross", envDuration("CHORD_TIMEOUT_FIND_SUCCESSOR_CROSS", chord.DefaultTimeoutFindSuccessorCross), "/find_successor timeout for cross-region peers")
+	flag.DurationVar(&cfg.TimeoutFixFingersSame, "timeout-fix-fingers-same", envDuration("CHORD_TIMEOUT_FIX_FINGERS_SAME", chord.DefaultTimeoutFixFingersSame), "fix_fingers /find_successor timeout for same-region peers")
+	flag.DurationVar(&cfg.TimeoutFixFingersCross, "timeout-fix-fingers-cross", envDuration("CHORD_TIMEOUT_FIX_FINGERS_CROSS", chord.DefaultTimeoutFixFingersCross), "fix_fingers /find_successor timeout for cross-region peers")
+	flag.DurationVar(&cfg.LatencyProbeIntervalActive, "latency-probe-interval-active", envDuration("CHORD_LATENCY_PROBE_ACTIVE", chord.DefaultLatencyProbeActiveInterval), "RTT probe interval in active mode")
+	flag.DurationVar(&cfg.LatencyProbeIntervalQuiet, "latency-probe-interval-quiet", envDuration("CHORD_LATENCY_PROBE_QUIET", chord.DefaultLatencyProbeQuietInterval), "RTT probe interval in quiet mode")
+	flag.Float64Var(&cfg.RTTEWMAAlpha, "rtt-ewma-alpha", envFloat("CHORD_RTT_EWMA_ALPHA", chord.DefaultRTTEWMAAlpha), "EWMA smoothing factor for RTT samples")
+	flag.DurationVar(&cfg.RTTSampleExpiry, "rtt-sample-expiry", envDuration("CHORD_RTT_SAMPLE_EXPIRY", chord.DefaultRTTSampleExpiry), "RTT sample expiry duration")
+	flag.BoolVar(&cfg.PiggybackEnabled, "piggyback-enabled", envBool("CHORD_PIGGYBACK_ENABLED", true), "attach piggyback topology hints to responses")
+	flag.IntVar(&cfg.StabilizeDebounceThreshold, "stabilize-debounce-threshold", envInt("CHORD_STABILIZE_DEBOUNCE", chord.DefaultStabilizeDebounceThreshold), "consecutive stabilize changes before debounce")
+	flag.DurationVar(&cfg.TopologyChangeWindow, "topology-change-window", envDuration("CHORD_TOPOLOGY_CHANGE_WINDOW", chord.DefaultTopologyChangeWindow), "quiet period before switching to quiet maintenance mode")
+	flag.DurationVar(&cfg.StabilizeActiveInterval, "stabilize-active-interval", envDuration("CHORD_STABILIZE_ACTIVE_INTERVAL", chord.DefaultStabilizeActiveInterval), "stabilize interval in active mode")
+	flag.DurationVar(&cfg.StabilizeQuietInterval, "stabilize-quiet-interval", envDuration("CHORD_STABILIZE_QUIET_INTERVAL", chord.DefaultStabilizeQuietInterval), "stabilize interval in quiet mode")
+	flag.DurationVar(&cfg.FixFingersActiveInterval, "fix-fingers-active-interval", envDuration("CHORD_FIX_FINGERS_ACTIVE_INTERVAL", chord.DefaultFixFingersActiveInterval), "fix_fingers interval in active mode")
+	flag.DurationVar(&cfg.FixFingersQuietInterval, "fix-fingers-quiet-interval", envDuration("CHORD_FIX_FINGERS_QUIET_INTERVAL", chord.DefaultFixFingersQuietInterval), "fix_fingers interval in quiet mode")
+	flag.DurationVar(&cfg.CheckPredecessorActiveInterval, "check-predecessor-active-interval", envDuration("CHORD_CHECK_PREDECESSOR_ACTIVE_INTERVAL", chord.DefaultCheckPredecessorActiveInterval), "check_predecessor interval in active mode")
+	flag.DurationVar(&cfg.CheckPredecessorQuietInterval, "check-predecessor-quiet-interval", envDuration("CHORD_CHECK_PREDECESSOR_QUIET_INTERVAL", chord.DefaultCheckPredecessorQuietInterval), "check_predecessor interval in quiet mode")
 	flag.Parse()
 
 	normalized, err := chord.NormalizeURI(cfg.NodeURI)
@@ -134,6 +212,38 @@ func (c Config) ChordOptions() chord.Options {
 		SuspiciousThreshold: c.SuspiciousThreshold,
 		FailedThreshold:     c.FailedThreshold,
 		TrackerSeedCount:    c.TrackerSeedCount,
+
+		Region:                         c.NodeRegion,
+		PredecessorListSize:            c.PredecessorListSize,
+		FixFingersBatchSizeActive:      c.FixFingersBatchSizeActive,
+		FixFingersBatchSizeQuiet:       c.FixFingersBatchSizeQuiet,
+		RoutingCacheEnabled:            c.RoutingCacheEnabled,
+		RoutingCacheSize:               c.RoutingCacheSize,
+		RoutingCacheTTL:                c.RoutingCacheTTL,
+		LatencyWeightID:                c.LatencyWeightID,
+		LatencyWeightRTT:               c.LatencyWeightRTT,
+		LatencyWeightRegion:            c.LatencyWeightRegion,
+		ParallelLookupEnabled:          c.ParallelLookupEnabled,
+		ParallelLookupCandidates:       c.ParallelLookupCandidates,
+		TimeoutPingSameRegion:          c.TimeoutPingSameRegion,
+		TimeoutPingCrossRegion:         c.TimeoutPingCrossRegion,
+		TimeoutFindSuccessorSame:       c.TimeoutFindSuccessorSame,
+		TimeoutFindSuccessorCross:      c.TimeoutFindSuccessorCross,
+		TimeoutFixFingersSame:          c.TimeoutFixFingersSame,
+		TimeoutFixFingersCross:         c.TimeoutFixFingersCross,
+		LatencyProbeIntervalActive:     c.LatencyProbeIntervalActive,
+		LatencyProbeIntervalQuiet:      c.LatencyProbeIntervalQuiet,
+		RTTEWMAAlpha:                   c.RTTEWMAAlpha,
+		RTTSampleExpiry:                c.RTTSampleExpiry,
+		PiggybackEnabled:               c.PiggybackEnabled,
+		StabilizeDebounceThreshold:     c.StabilizeDebounceThreshold,
+		TopologyChangeWindow:           c.TopologyChangeWindow,
+		StabilizeActiveInterval:        c.StabilizeActiveInterval,
+		StabilizeQuietInterval:         c.StabilizeQuietInterval,
+		FixFingersActiveInterval:       c.FixFingersActiveInterval,
+		FixFingersQuietInterval:        c.FixFingersQuietInterval,
+		CheckPredecessorActiveInterval: c.CheckPredecessorActiveInterval,
+		CheckPredecessorQuietInterval:  c.CheckPredecessorQuietInterval,
 	}
 }
 

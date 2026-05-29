@@ -143,6 +143,9 @@ func appendQuery(path string, values url.Values) string {
 	return path + "?" + query
 }
 
+// timeNow is a package-level alias so tests can stub it if needed.
+var timeNow = time.Now
+
 func requireHTTPSURI(uri string) error {
 	normalized, err := chord.NormalizeURI(uri)
 	if err != nil {
