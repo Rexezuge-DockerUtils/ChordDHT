@@ -1,6 +1,6 @@
 # ChordDHT
 
-A learning implementation of the [Chord](https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf) distributed hash table protocol (Stoica et al., ACM SIGCOMM 2001), written in Go with no external dependencies.
+A learning implementation of the [Chord](https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf) distributed hash table protocol (Stoica et al., ACM SIGCOMM 2001), written in Go with no external dependencies. Now at **v3.0** with adaptive maintenance, latency-aware routing, LRU route caching, and enhanced fault tolerance.
 
 > **Scope:** Chord ring formation and O(log N) key routing only. No key-value storage. Not intended for production use.
 
@@ -12,17 +12,35 @@ A learning implementation of the [Chord](https://pdos.csail.mit.edu/papers/ton:c
 
 ## How It Works
 
-Every node maps its canonical HTTPS URI to a 160-bit ID via SHA-1 and joins a consistent-hash ring. Routing uses an iterative finger-table lookup that resolves any key in at most O(log N) hops. A 60-second maintenance cycle runs `check_predecessor → stabilize → fix_fingers → health_check_ring → report_to_tracker` to keep the ring self-healing.
+Every node maps its canonical HTTPS URI to a 160-bit ID via SHA-1 and joins a consistent-hash ring. Routing uses an iterative finger-table lookup that resolves any key in at most O(log N) hops. Independent maintenance goroutines run at adaptive intervals to keep the ring self-healing — faster during topology changes, slower during steady state.
 
 Key protocol parameters:
 
 | Parameter | Value | Notes |
 |---|---|---|
 | ID space | 2¹⁶⁰ (SHA-1) | Matches the original Chord paper |
-| Finger table | 160 entries | One entry repaired per maintenance cycle |
-| Successor list | r = 3 | Tolerates up to 3 consecutive node failures |
-| Maintenance interval | 60 s | Configurable |
-| Lookup mode | Iterative | HTTP call depth is always 1; caller drives hops |
+| Finger table | 160 entries | Batch-parallel repair (k=8 active / k=4 quiet) |
+| Successor list | r = 5 | Tolerates up to 4 consecutive node failures |
+| Stabilize interval | 15 s (active) / 60 s (quiet) | Switches on topology events |
+| fix_fingers interval | 10 s (active) / 30 s (quiet) | Exponential-jump repair order |
+| Lookup mode | Iterative + LRU cache | HTTP depth always 1; optional parallel probe |
+| Routing cache | LRU, 1000 entries, 30 s TTL | Interval-aware; cleared on topology change |
+| Region routing | EWMA RTT + region affinity | Score = 0.6·ID + 0.3·RTT + 0.1·region |
+
+### v3.0 additions over v2.0
+
+- **Adaptive maintenance** — `ACTIVE_MAINTENANCE` / `QUIET_MAINTENANCE` modes with separate goroutine loops
+- **Batch parallel fix_fingers** — repairs k entries concurrently in exponential-jump priority order
+- **Fast crash detection** — predecessor confirmed dead after 2 retries; immediate successor switch on failure
+- **Dynamic successor list** — default r=5, configurable up to 10
+- **Predecessor chain** — `predecessor_list[2]` for faster stabilization after predecessor loss
+- **Multi-path isolation recovery** — successor list → predecessor list → finger scan → tracker → single-node fallback
+- **LRU routing cache** — skip full ring traversal for hot keys; interval-aware cache entries
+- **Latency-aware routing** — RTT-weighted EWMA + region affinity score replaces pure ID distance
+- **Tiered timeouts** — different same-region / cross-region timeouts per operation type
+- **Piggyback hints** — RTT and successor list hints ride existing response bodies
+- **Finger table warm-up** — concurrently fetches 32 entries immediately after join
+- **New endpoints** — `GET /chord/rtt` and `GET /chord/status` for observability
 
 ## Project Layout
 

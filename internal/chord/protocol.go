@@ -36,8 +36,8 @@ func (n *Node) HandleNotify(req NotifyRequest) (NotifyResponse, error) {
 		return NotifyResponse{}, NewAPIError(http.StatusBadRequest, ErrInvalidRequest, err.Error())
 	}
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	if n.status == StatusLeaving {
+		n.mu.Unlock()
 		return NotifyResponse{}, NewAPIError(http.StatusServiceUnavailable, ErrNodeLeaving, "node is leaving")
 	}
 	accepted := false
@@ -47,15 +47,51 @@ func (n *Node) HandleNotify(req NotifyRequest) (NotifyResponse, error) {
 		previousPredecessor = n.predecessor.NodeID
 	}
 	if candidate.NodeID != n.self.NodeID && (n.predecessor == nil || InRangeOpenOpen(candidate.NodeID, n.predecessor.NodeID, n.self.NodeID)) {
+		// Update predecessor chain: shift existing predecessor to [1], new candidate to [0].
+		p := n.options.PredecessorListSize
+		if p <= 0 {
+			p = DefaultPredecessorListSize
+		}
+		newList := make([]NodeInfo, 0, p)
+		newList = append(newList, candidate)
+		if n.predecessor != nil && len(newList) < p {
+			newList = append(newList, *n.predecessor)
+		}
+		n.predecessorList = newList
 		n.predecessor = &candidate
 		accepted = true
 	}
+	currentPred := cloneNodePtr(n.predecessor)
+	n.mu.Unlock()
+
 	if accepted {
 		logging.Infof("accepted predecessor notification from=%s previous=%s", candidate.NodeID, previousPredecessor)
+		n.emitTopologyChange()
+		// Async: fetch candidate's predecessor to fill predecessorList[1].
+		if n.client != nil {
+			go func() {
+				resp, err := n.client.Predecessor(candidate.URI)
+				if err == nil && resp.Predecessor != nil && resp.Predecessor.NodeID != n.self.NodeID {
+					n.mu.Lock()
+					p := n.options.PredecessorListSize
+					if p <= 0 {
+						p = DefaultPredecessorListSize
+					}
+					if len(n.predecessorList) >= 1 && n.predecessorList[0].NodeID == candidate.NodeID {
+						if len(n.predecessorList) < p {
+							n.predecessorList = append(n.predecessorList, resp.Predecessor.Core())
+						} else if len(n.predecessorList) >= 2 {
+							n.predecessorList[1] = resp.Predecessor.Core()
+						}
+					}
+					n.mu.Unlock()
+				}
+			}()
+		}
 	} else {
 		logging.Debugf("rejected predecessor notification from=%s current=%s", candidate.NodeID, previousPredecessor)
 	}
-	return NotifyResponse{Accepted: accepted, Predecessor: cloneNodePtr(n.predecessor)}, nil
+	return NotifyResponse{Accepted: accepted, Predecessor: currentPred}, nil
 }
 
 func (n *Node) HandleLeave(req LeaveRequest) (LeaveResponse, error) {

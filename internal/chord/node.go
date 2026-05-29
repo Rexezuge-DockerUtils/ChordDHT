@@ -26,6 +26,39 @@ type Options struct {
 	// OnCRLRefresh is called after each successful tracker heartbeat with the raw CRL JSON
 	// (or nil if no CRL is available). May be nil.
 	OnCRLRefresh func(crlJSON []byte)
+
+	// v3.0 options
+	Region                          string
+	PredecessorListSize             int
+	FixFingersBatchSizeActive       int
+	FixFingersBatchSizeQuiet        int
+	RoutingCacheEnabled             bool
+	RoutingCacheSize                int
+	RoutingCacheTTL                 time.Duration
+	LatencyWeightID                 float64
+	LatencyWeightRTT                float64
+	LatencyWeightRegion             float64
+	ParallelLookupEnabled           bool
+	ParallelLookupCandidates        int
+	TimeoutPingSameRegion           time.Duration
+	TimeoutPingCrossRegion          time.Duration
+	TimeoutFindSuccessorSame        time.Duration
+	TimeoutFindSuccessorCross       time.Duration
+	TimeoutFixFingersSame           time.Duration
+	TimeoutFixFingersCross          time.Duration
+	LatencyProbeIntervalActive      time.Duration
+	LatencyProbeIntervalQuiet       time.Duration
+	RTTEWMAAlpha                    float64
+	RTTSampleExpiry                 time.Duration
+	PiggybackEnabled                bool
+	StabilizeDebounceThreshold      int
+	TopologyChangeWindow            time.Duration
+	StabilizeActiveInterval         time.Duration
+	StabilizeQuietInterval          time.Duration
+	FixFingersActiveInterval        time.Duration
+	FixFingersQuietInterval         time.Duration
+	CheckPredecessorActiveInterval  time.Duration
+	CheckPredecessorQuietInterval   time.Duration
 }
 
 func DefaultOptions() Options {
@@ -36,6 +69,38 @@ func DefaultOptions() Options {
 		SuspiciousThreshold: DefaultSuspiciousThreshold,
 		FailedThreshold:     DefaultFailedThreshold,
 		TrackerSeedCount:    DefaultTrackerSeedCount,
+
+		Region:                         "default",
+		PredecessorListSize:            DefaultPredecessorListSize,
+		FixFingersBatchSizeActive:      DefaultFixFingersBatchSizeActive,
+		FixFingersBatchSizeQuiet:       DefaultFixFingersBatchSizeQuiet,
+		RoutingCacheEnabled:            true,
+		RoutingCacheSize:               DefaultRoutingCacheSize,
+		RoutingCacheTTL:                DefaultRoutingCacheTTL,
+		LatencyWeightID:                0.6,
+		LatencyWeightRTT:               0.3,
+		LatencyWeightRegion:            0.1,
+		ParallelLookupEnabled:          false,
+		ParallelLookupCandidates:       3,
+		TimeoutPingSameRegion:          DefaultTimeoutPingSameRegion,
+		TimeoutPingCrossRegion:         DefaultTimeoutPingCrossRegion,
+		TimeoutFindSuccessorSame:       DefaultTimeoutFindSuccessorSame,
+		TimeoutFindSuccessorCross:      DefaultTimeoutFindSuccessorCross,
+		TimeoutFixFingersSame:          DefaultTimeoutFixFingersSame,
+		TimeoutFixFingersCross:         DefaultTimeoutFixFingersCross,
+		LatencyProbeIntervalActive:     DefaultLatencyProbeActiveInterval,
+		LatencyProbeIntervalQuiet:      DefaultLatencyProbeQuietInterval,
+		RTTEWMAAlpha:                   DefaultRTTEWMAAlpha,
+		RTTSampleExpiry:                DefaultRTTSampleExpiry,
+		PiggybackEnabled:               true,
+		StabilizeDebounceThreshold:     DefaultStabilizeDebounceThreshold,
+		TopologyChangeWindow:           DefaultTopologyChangeWindow,
+		StabilizeActiveInterval:        DefaultStabilizeActiveInterval,
+		StabilizeQuietInterval:         DefaultStabilizeQuietInterval,
+		FixFingersActiveInterval:       DefaultFixFingersActiveInterval,
+		FixFingersQuietInterval:        DefaultFixFingersQuietInterval,
+		CheckPredecessorActiveInterval: DefaultCheckPredecessorActiveInterval,
+		CheckPredecessorQuietInterval:  DefaultCheckPredecessorQuietInterval,
 	}
 }
 
@@ -43,6 +108,7 @@ type Node struct {
 	mu                sync.RWMutex
 	self              NodeInfo
 	predecessor       *NodeInfo
+	predecessorList   []NodeInfo
 	successor         NodeInfo
 	successorList     []NodeInfo
 	fingers           []FingerEntry
@@ -56,6 +122,15 @@ type Node struct {
 	tracker           TrackerClient
 	options           Options
 	failures          map[string]int
+
+	// v3.0 fields
+	region                 string
+	maintenanceMode        MaintenanceMode
+	lastChangeTime         time.Time
+	stabilizeDebounceCount int
+	topologyChangeCh       chan struct{}
+	rttCache               *RTTCache
+	routingCache           *RoutingCache
 }
 
 func NewNode(uri string, opts Options, client PeerClient, tracker TrackerClient) (*Node, error) {
@@ -85,18 +160,30 @@ func NewNode(uri string, opts Options, client PeerClient, tracker TrackerClient)
 		fingers[i] = FingerEntry{Index: i, Start: start, Node: self.Core(), Status: FingerUnknown}
 	}
 
-	n := &Node{
-		self:          self,
-		successor:     self.Core(),
-		successorList: []NodeInfo{self.Core()},
-		fingers:       fingers,
-		status:        StatusInitializing,
-		startedAt:     time.Now().UTC(),
-		client:        client,
-		tracker:       tracker,
-		options:       opts,
-		failures:      map[string]int{},
+	var rc *RoutingCache
+	if opts.RoutingCacheEnabled {
+		rc = NewRoutingCache(opts.RoutingCacheSize, opts.RoutingCacheTTL)
 	}
+
+	n := &Node{
+		self:             self,
+		successor:        self.Core(),
+		successorList:    []NodeInfo{self.Core()},
+		predecessorList:  make([]NodeInfo, 0, opts.PredecessorListSize),
+		fingers:          fingers,
+		status:           StatusInitializing,
+		startedAt:        time.Now().UTC(),
+		client:           client,
+		tracker:          tracker,
+		options:          opts,
+		failures:         map[string]int{},
+		region:           opts.Region,
+		maintenanceMode:  QuietMaintenance,
+		topologyChangeCh: make(chan struct{}, 1),
+		rttCache:         NewRTTCache(opts.RTTEWMAAlpha, opts.RTTSampleExpiry),
+		routingCache:     rc,
+	}
+	n.self.Region = opts.Region
 	return n, nil
 }
 
@@ -154,11 +241,14 @@ func (n *Node) State() StateResponse {
 		URI:               n.self.URI,
 		Status:            n.status,
 		Predecessor:       cloneNodePtr(n.predecessor),
+		PredecessorList:   cloneNodes(n.predecessorList),
 		Successor:         n.successor,
 		SuccessorList:     cloneNodes(n.successorList),
 		FingerTable:       cloneFingers(n.fingers),
 		LastMaintenanceAt: cloneTimePtr(n.lastMaintenanceAt),
 		NextFingerIndex:   n.nextFingerIndex,
+		MaintenanceMode:   n.maintenanceMode,
+		Region:            n.region,
 	}
 }
 
@@ -177,7 +267,71 @@ func (n *Node) Ping() PingResponse {
 func (n *Node) Predecessor() PredecessorResponse {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
-	return PredecessorResponse{Predecessor: cloneNodePtr(n.predecessor)}
+	return PredecessorResponse{
+		Predecessor:     cloneNodePtr(n.predecessor),
+		PredecessorList: cloneNodes(n.predecessorList),
+	}
+}
+
+func (n *Node) RTTData() RTTResponse {
+	return RTTResponse{
+		Samples: n.rttCache.Snapshot(),
+		Region:  n.region,
+	}
+}
+
+func (n *Node) NodeStatusInfo() NodeStatusResponse {
+	n.mu.RLock()
+	mode := n.maintenanceMode
+	lastChange := n.lastChangeTime
+	n.mu.RUnlock()
+
+	var hits, misses int64
+	var size int
+	if n.routingCache != nil {
+		hits, misses, size = n.routingCache.Stats()
+	}
+	return NodeStatusResponse{
+		MaintenanceMode: mode,
+		LastChangeTime:  lastChange,
+		CacheHits:       hits,
+		CacheMisses:     misses,
+		CacheSize:       size,
+		Region:          n.region,
+	}
+}
+
+func (n *Node) emitTopologyChange() {
+	select {
+	case n.topologyChangeCh <- struct{}{}:
+	default:
+	}
+	if n.routingCache != nil {
+		n.routingCache.InvalidateAll()
+	}
+}
+
+func (n *Node) switchMode(mode MaintenanceMode) {
+	n.mu.Lock()
+	n.maintenanceMode = mode
+	n.mu.Unlock()
+}
+
+func (n *Node) buildPiggyback() *PiggybackData {
+	if !n.options.PiggybackEnabled {
+		return nil
+	}
+	n.mu.RLock()
+	ids := make([]string, 0, len(n.successorList))
+	for _, s := range n.successorList {
+		ids = append(ids, s.NodeID)
+	}
+	n.mu.RUnlock()
+	return &PiggybackData{
+		SenderSuccessorList: ids,
+		SenderRegion:        n.region,
+		SenderRTTHints:      n.rttCache.Snapshot(),
+	}
 }
 
 func (n *Node) SuccessorList() SuccessorListResponse {
@@ -264,6 +418,7 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 		logging.Infof("joined network via seed=%s successor=%s successor_list_size=%d", seed.NodeID, resp.Successor.NodeID, len(resp.SuccessorList))
 		_, _ = n.client.Notify(resp.Successor.URI, NotifyRequest{Node: selfWithCert})
 		n.registerTracker()
+		go n.warmUpFingerTable()
 		return nil
 	}
 
