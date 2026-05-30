@@ -589,6 +589,30 @@ func (n *Node) ReportToTracker() {
 	}
 	maintenanceMode := n.maintenanceMode
 	predecessorListSize := len(n.predecessorList)
+
+	succList := make([]string, 0, len(n.successorList))
+	for _, s := range n.successorList {
+		if s.NodeID != "" {
+			succList = append(succList, s.NodeID)
+		}
+	}
+	predList := make([]string, 0, len(n.predecessorList))
+	for _, p := range n.predecessorList {
+		if p.NodeID != "" {
+			predList = append(predList, p.NodeID)
+		}
+	}
+	seen := map[string]struct{}{}
+	fingerNodes := make([]string, 0)
+	for _, f := range n.fingers {
+		if f.Valid && f.Node.NodeID != "" && f.Node.NodeID != n.self.NodeID {
+			if _, ok := seen[f.Node.NodeID]; !ok {
+				seen[f.Node.NodeID] = struct{}{}
+				fingerNodes = append(fingerNodes, f.Node.NodeID)
+			}
+		}
+	}
+
 	heartbeat := TrackerHeartbeat{
 		Status:                status,
 		SuccessorID:           successorID,
@@ -602,9 +626,15 @@ func (n *Node) ReportToTracker() {
 		Region:                n.region,
 		MaintenanceMode:       maintenanceMode,
 		PredecessorListSize:   predecessorListSize,
+		SuccessorList:         succList,
+		PredecessorList:       predList,
+		FingerNodes:           fingerNodes,
 	}
 	n.mu.RUnlock()
 
+	if n.rttCache != nil {
+		heartbeat.RTTSamples = n.rttCache.Snapshot()
+	}
 	if n.routingCache != nil {
 		heartbeat.CacheHits, heartbeat.CacheMisses, heartbeat.CacheSize = n.routingCache.Stats()
 	}

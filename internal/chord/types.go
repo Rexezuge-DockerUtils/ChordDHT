@@ -198,10 +198,14 @@ type TrackerHeartbeat struct {
 	CertExpiresAt         *int64          `json:"cert_expires_at,omitempty"`
 	Region                string          `json:"region,omitempty"`
 	MaintenanceMode       MaintenanceMode `json:"maintenance_mode,omitempty"`
-	CacheHits             int64           `json:"cache_hits,omitempty"`
-	CacheMisses           int64           `json:"cache_misses,omitempty"`
-	CacheSize             int             `json:"cache_size,omitempty"`
-	PredecessorListSize   int             `json:"predecessor_list_size,omitempty"`
+	CacheHits             int64            `json:"cache_hits,omitempty"`
+	CacheMisses           int64            `json:"cache_misses,omitempty"`
+	CacheSize             int              `json:"cache_size,omitempty"`
+	PredecessorListSize   int              `json:"predecessor_list_size,omitempty"`
+	SuccessorList         []string         `json:"successor_list,omitempty"`
+	PredecessorList       []string         `json:"predecessor_list,omitempty"`
+	RTTSamples            map[string]int64 `json:"rtt_samples,omitempty"`
+	FingerNodes           []string         `json:"finger_nodes,omitempty"`
 }
 
 type RTTResponse struct {
