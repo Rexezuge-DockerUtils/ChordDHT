@@ -74,13 +74,17 @@ func (c *TrackerClient) Deregister(nodeID string) error {
 
 func (c *TrackerClient) DetectRegion() (string, error) {
 	var resp struct {
-		Region *string `json:"region"`
+		Region  *string `json:"region"`
+		Country *string `json:"country"`
 	}
 	if err := c.endpoint.do(http.MethodGet, "/tracker/geo", nil, &resp); err != nil {
 		return "", err
 	}
-	if resp.Region != nil {
+	if resp.Region != nil && *resp.Region != "" {
 		return *resp.Region, nil
+	}
+	if resp.Country != nil && *resp.Country != "" {
+		return *resp.Country, nil
 	}
 	return "", nil
 }
