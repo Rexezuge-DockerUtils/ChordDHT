@@ -305,7 +305,15 @@ func (n *Node) Stabilize() {
 				n.mu.Lock()
 				n.successor = self
 				n.successorList = []NodeInfo{self}
+				if currentSuccessor.NodeID != self.NodeID {
+					n.status = StatusIsolated
+					n.predecessor = nil
+				}
 				n.mu.Unlock()
+				if currentSuccessor.NodeID != self.NodeID {
+					logging.Warnf("node became isolated; no successor candidates reachable")
+					n.emitTopologyChange()
+				}
 				return
 			}
 			successor := pred.Core()
