@@ -167,6 +167,9 @@ func main() {
 	if err := node.JoinNetwork(manualSeeds); err != nil {
 		log.Fatalf("join failed: %v", err)
 	}
+	if cfg.NodeRegion == "" {
+		peerClient.SetSelfRegion(node.Region())
+	}
 
 	go node.RunMaintenance(ctx)
 

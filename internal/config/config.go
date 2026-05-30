@@ -124,7 +124,7 @@ func Load() (Config, error) {
 	flag.IntVar(&cfg.Auth.BootGracePeriodSecs, "auth.boot-grace-period-secs", envInt("CHORD_AUTH_BOOT_GRACE", 0), "seconds after startup before auth is enforced")
 
 	// v3.0 flags
-	flag.StringVar(&cfg.NodeRegion, "node-region", env("CHORD_NODE_REGION", "default"), "node region label")
+	flag.StringVar(&cfg.NodeRegion, "node-region", env("CHORD_NODE_REGION", ""), "node region label (auto-detected from tracker when empty)")
 	flag.IntVar(&cfg.PredecessorListSize, "predecessor-list-size", envInt("CHORD_PREDECESSOR_LIST_SIZE", chord.DefaultPredecessorListSize), "predecessor chain backup length")
 	flag.IntVar(&cfg.FixFingersBatchSizeActive, "fix-fingers-batch-active", envInt("CHORD_FIX_FINGERS_BATCH_ACTIVE", chord.DefaultFixFingersBatchSizeActive), "fingers repaired per cycle in active mode")
 	flag.IntVar(&cfg.FixFingersBatchSizeQuiet, "fix-fingers-batch-quiet", envInt("CHORD_FIX_FINGERS_BATCH_QUIET", chord.DefaultFixFingersBatchSizeQuiet), "fingers repaired per cycle in quiet mode")
