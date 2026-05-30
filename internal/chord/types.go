@@ -232,7 +232,7 @@ type PeerClient interface {
 
 type TrackerClient interface {
 	Seeds(count int, exclude []string) ([]NodeInfo, error)
-	Register(node NodeInfo) error
+	Register(node NodeInfo) (string, error)
 	Deregister(nodeID string) error
 	Heartbeat(nodeID string, heartbeat TrackerHeartbeat) error
 	FetchCRL() ([]byte, error)

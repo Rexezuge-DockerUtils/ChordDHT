@@ -70,7 +70,7 @@ func DefaultOptions() Options {
 		FailedThreshold:     DefaultFailedThreshold,
 		TrackerSeedCount:    DefaultTrackerSeedCount,
 
-		Region:                         "default",
+		Region:                         "",
 		PredecessorListSize:            DefaultPredecessorListSize,
 		FixFingersBatchSizeActive:      DefaultFixFingersBatchSizeActive,
 		FixFingersBatchSizeQuiet:       DefaultFixFingersBatchSizeQuiet,
@@ -429,15 +429,30 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 }
 
 func (n *Node) registerTracker() {
-	if n.tracker != nil {
-		self := n.Self().Core()
-		self.Certificate = n.options.NodeCertificate
-		if err := n.tracker.Register(self); err != nil {
-			logging.Warnf("tracker registration failed node_id=%s error=%v", self.NodeID, err)
-			return
-		}
-		logging.Infof("registered node with tracker node_id=%s", self.NodeID)
+	if n.tracker == nil {
+		return
 	}
+	self := n.Self().Core()
+	self.Certificate = n.options.NodeCertificate
+	region, err := n.tracker.Register(self)
+	if err != nil {
+		logging.Warnf("tracker registration failed node_id=%s error=%v", self.NodeID, err)
+		return
+	}
+	if n.region == "" && region != "" {
+		n.mu.Lock()
+		n.region = region
+		n.self.Region = region
+		n.mu.Unlock()
+		logging.Infof("region auto-detected from tracker node_id=%s region=%s", self.NodeID, region)
+	}
+	logging.Infof("registered node with tracker node_id=%s", self.NodeID)
+}
+
+func (n *Node) Region() string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.region
 }
 
 func cloneNodePtr(node *NodeInfo) *NodeInfo {
