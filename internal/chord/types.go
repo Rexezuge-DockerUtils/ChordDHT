@@ -187,15 +187,16 @@ type FingerTableResponse struct {
 }
 
 type TrackerHeartbeat struct {
-	Status              Status  `json:"status"`
-	SuccessorID         *string `json:"successor_id"`
-	PredecessorID       *string `json:"predecessor_id"`
-	SuccessorListSize   int     `json:"successor_list_size"`
-	FingerTableCoverage float64 `json:"finger_table_coverage"`
-	UptimeSeconds       int64   `json:"uptime_seconds"`
-	MaintenanceCycles   uint64  `json:"maintenance_cycles"`
-	CertExpiresAt       *int64  `json:"cert_expires_at,omitempty"`
-	Region              string  `json:"region,omitempty"`
+	Status                Status  `json:"status"`
+	SuccessorID           *string `json:"successor_id"`
+	PredecessorID         *string `json:"predecessor_id"`
+	SuccessorListSize     int     `json:"successor_list_size"`
+	SuccessorListCapacity int     `json:"successor_list_capacity"`
+	FingerTableCoverage   float64 `json:"finger_table_coverage"`
+	UptimeSeconds         int64   `json:"uptime_seconds"`
+	MaintenanceCycles     uint64  `json:"maintenance_cycles"`
+	CertExpiresAt         *int64  `json:"cert_expires_at,omitempty"`
+	Region                string  `json:"region,omitempty"`
 }
 
 type RTTResponse struct {

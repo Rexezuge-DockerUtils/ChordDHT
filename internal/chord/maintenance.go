@@ -588,15 +588,16 @@ func (n *Node) ReportToTracker() {
 		predecessorID = stringPtrIfNotEmpty(n.predecessor.NodeID)
 	}
 	heartbeat := TrackerHeartbeat{
-		Status:              status,
-		SuccessorID:         successorID,
-		PredecessorID:       predecessorID,
-		SuccessorListSize:   len(n.successorList),
-		FingerTableCoverage: n.fingerCoverageLocked(),
-		UptimeSeconds:       int64(time.Since(n.startedAt).Seconds()),
-		MaintenanceCycles:   n.maintenanceCycles.Load(),
-		CertExpiresAt:       n.options.NodeCertExpiresAt,
-		Region:              n.region,
+		Status:                status,
+		SuccessorID:           successorID,
+		PredecessorID:         predecessorID,
+		SuccessorListSize:     len(n.successorList),
+		SuccessorListCapacity: n.options.SuccessorListSize,
+		FingerTableCoverage:   n.fingerCoverageLocked(),
+		UptimeSeconds:         int64(time.Since(n.startedAt).Seconds()),
+		MaintenanceCycles:     n.maintenanceCycles.Load(),
+		CertExpiresAt:         n.options.NodeCertExpiresAt,
+		Region:                n.region,
 	}
 	n.mu.RUnlock()
 	if err := n.tracker.Heartbeat(n.self.NodeID, heartbeat); err != nil {
@@ -808,4 +809,3 @@ func stringPtrIfNotEmpty(value string) *string {
 	copy := value
 	return &copy
 }
-
