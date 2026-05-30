@@ -72,6 +72,19 @@ func (c *TrackerClient) Deregister(nodeID string) error {
 	return c.endpoint.do(http.MethodDelete, "/tracker/nodes/"+url.PathEscape(nodeID), nil, nil)
 }
 
+func (c *TrackerClient) DetectRegion() (string, error) {
+	var resp struct {
+		Region *string `json:"region"`
+	}
+	if err := c.endpoint.do(http.MethodGet, "/tracker/geo", nil, &resp); err != nil {
+		return "", err
+	}
+	if resp.Region != nil {
+		return *resp.Region, nil
+	}
+	return "", nil
+}
+
 func (c *TrackerClient) Heartbeat(nodeID string, heartbeat chord.TrackerHeartbeat) error {
 	return c.endpoint.do(http.MethodPost, "/tracker/nodes/"+url.PathEscape(nodeID)+"/heartbeat", heartbeat, nil)
 }
