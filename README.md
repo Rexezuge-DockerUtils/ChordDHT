@@ -89,13 +89,51 @@ Every flag has an environment variable equivalent:
 | `-seeds` | `NODE_MANUAL_SEEDS` | *(none)* | Comma-separated seed node URIs used when no tracker is configured |
 | `-http-timeout` | `CHORD_HTTP_TIMEOUT_SECONDS`¹ | `5s` | Outbound HTTP request timeout |
 | `-maintenance-interval` | `CHORD_MAINTENANCE_INTERVAL_SECONDS`¹ | `60s` | How often the maintenance cycle runs |
-| `-successor-list-size` | `CHORD_SUCCESSOR_LIST_SIZE` | `3` | Successor list length (r) |
+| `-successor-list-size` | `CHORD_SUCCESSOR_LIST_SIZE` | `5` | Successor list length (r) |
 | `-max-hops` | `CHORD_MAX_HOPS` | `161` | Hard hop limit for `find_successor` |
 | `-suspicious-threshold` | `CHORD_SUSPICIOUS_THRESHOLD` | `1` | Consecutive failures before marking a peer suspicious |
 | `-failed-threshold` | `CHORD_FAILED_THRESHOLD` | `3` | Consecutive failures before evicting a peer from routing tables |
 | `-tracker-seed-count` | `TRACKER_SEED_COUNT` | `5` | How many seed nodes to request from the tracker on join |
 
 ¹ Environment duration values are **integer seconds** (e.g. `CHORD_HTTP_TIMEOUT_SECONDS=10`). CLI flags use Go duration syntax (e.g. `-http-timeout=10s`).
+
+### v3.0 Tuning Flags
+
+Most v3.0 features are enabled by default. Parallel lookup is opt-in.
+
+| Flag | Env var | Default | Description |
+|---|---|---|---|
+| `-node-region` | `CHORD_NODE_REGION` | `default` | Region label used for latency-aware routing and timeout selection |
+| `-predecessor-list-size` | `CHORD_PREDECESSOR_LIST_SIZE` | `2` | Predecessor chain backup length |
+| `-fix-fingers-batch-active` | `CHORD_FIX_FINGERS_BATCH_ACTIVE` | `8` | Finger entries repaired per cycle in active mode |
+| `-fix-fingers-batch-quiet` | `CHORD_FIX_FINGERS_BATCH_QUIET` | `4` | Finger entries repaired per cycle in quiet mode |
+| `-routing-cache-enabled` | `CHORD_ROUTING_CACHE_ENABLED` | `true` | Enable LRU routing result cache |
+| `-routing-cache-size` | `CHORD_ROUTING_CACHE_SIZE` | `1000` | Maximum routing cache entries |
+| `-routing-cache-ttl` | `CHORD_ROUTING_CACHE_TTL_SECONDS`¹ | `30s` | Routing cache entry TTL |
+| `-latency-weight-id` | `CHORD_LATENCY_WEIGHT_ID` | `0.6` | Routing score weight for ID proximity |
+| `-latency-weight-rtt` | `CHORD_LATENCY_WEIGHT_RTT` | `0.3` | Routing score weight for RTT |
+| `-latency-weight-region` | `CHORD_LATENCY_WEIGHT_REGION` | `0.1` | Routing score weight for region affinity |
+| `-parallel-lookup-enabled` | `CHORD_PARALLEL_LOOKUP_ENABLED` | `false` | Enable parallel `find_successor` probing |
+| `-parallel-lookup-candidates` | `CHORD_PARALLEL_LOOKUP_CANDIDATES` | `3` | Candidate count for parallel lookup |
+| `-timeout-ping-same` | `CHORD_TIMEOUT_PING_SAME`¹ | `2s` | `/ping` timeout for same-region peers |
+| `-timeout-ping-cross` | `CHORD_TIMEOUT_PING_CROSS`¹ | `5s` | `/ping` timeout for cross-region peers |
+| `-timeout-find-successor-same` | `CHORD_TIMEOUT_FIND_SUCCESSOR_SAME`¹ | `5s` | `/find_successor` timeout for same-region peers |
+| `-timeout-find-successor-cross` | `CHORD_TIMEOUT_FIND_SUCCESSOR_CROSS`¹ | `15s` | `/find_successor` timeout for cross-region peers |
+| `-timeout-fix-fingers-same` | `CHORD_TIMEOUT_FIX_FINGERS_SAME`¹ | `5s` | `fix_fingers` lookup timeout for same-region peers |
+| `-timeout-fix-fingers-cross` | `CHORD_TIMEOUT_FIX_FINGERS_CROSS`¹ | `30s` | `fix_fingers` lookup timeout for cross-region peers |
+| `-latency-probe-interval-active` | `CHORD_LATENCY_PROBE_ACTIVE`¹ | `30s` | RTT probe interval in active mode |
+| `-latency-probe-interval-quiet` | `CHORD_LATENCY_PROBE_QUIET`¹ | `120s` | RTT probe interval in quiet mode |
+| `-rtt-ewma-alpha` | `CHORD_RTT_EWMA_ALPHA` | `0.3` | EWMA smoothing factor for RTT samples |
+| `-rtt-sample-expiry` | `CHORD_RTT_SAMPLE_EXPIRY`¹ | `300s` | RTT sample expiry duration |
+| `-piggyback-enabled` | `CHORD_PIGGYBACK_ENABLED` | `true` | Attach topology and RTT hints to responses |
+| `-stabilize-debounce-threshold` | `CHORD_STABILIZE_DEBOUNCE` | `3` | Consecutive stabilize changes before debounce |
+| `-topology-change-window` | `CHORD_TOPOLOGY_CHANGE_WINDOW`¹ | `120s` | Quiet period before switching to quiet maintenance mode |
+| `-stabilize-active-interval` | `CHORD_STABILIZE_ACTIVE_INTERVAL`¹ | `15s` | Stabilize interval in active mode |
+| `-stabilize-quiet-interval` | `CHORD_STABILIZE_QUIET_INTERVAL`¹ | `60s` | Stabilize interval in quiet mode |
+| `-fix-fingers-active-interval` | `CHORD_FIX_FINGERS_ACTIVE_INTERVAL`¹ | `10s` | `fix_fingers` interval in active mode |
+| `-fix-fingers-quiet-interval` | `CHORD_FIX_FINGERS_QUIET_INTERVAL`¹ | `30s` | `fix_fingers` interval in quiet mode |
+| `-check-predecessor-active-interval` | `CHORD_CHECK_PREDECESSOR_ACTIVE_INTERVAL`¹ | `10s` | Predecessor health-check interval in active mode |
+| `-check-predecessor-quiet-interval` | `CHORD_CHECK_PREDECESSOR_QUIET_INTERVAL`¹ | `30s` | Predecessor health-check interval in quiet mode |
 
 ### Bootstrap Behaviour
 
@@ -137,7 +175,7 @@ All endpoints use `Content-Type: application/json`. Unknown fields in request bo
 | `POST` | `/chord/find_successor` | Yes | Iterative lookup — returns `found: true` + successor, or `found: false` + next hop |
 | `GET` | `/chord/predecessor` | Yes | Current predecessor (`null` if none) |
 | `POST` | `/chord/notify` | Yes | Predecessor candidate announcement |
-| `GET` | `/chord/successor_list` | Yes | Backup successor list (up to r=3 entries) |
+| `GET` | `/chord/successor_list` | Yes | Backup successor list (defaults to r=5 entries) |
 | `POST` | `/chord/join` | Yes | Bootstrap entry point for a joining node |
 | `POST` | `/chord/leave` | Yes | Graceful-leave notification from a departing neighbour |
 | `GET` | `/chord/finger_table` | Yes | All 160 finger entries with repair status |
