@@ -19,7 +19,6 @@ import (
 	"chorddht/internal/config"
 	"chorddht/internal/httpapi"
 	"chorddht/internal/logging"
-	"chorddht/internal/regiondetect"
 )
 
 func main() {
@@ -29,12 +28,6 @@ func main() {
 	}
 	if err := logging.SetLevel(cfg.LogLevel); err != nil {
 		log.Fatalf("invalid log level: %v", err)
-	}
-	if cfg.NodeRegion == "" {
-		if detected := regiondetect.Detect(3 * time.Second); detected != "" {
-			cfg.NodeRegion = detected
-			logging.Infof("auto-detected node region region=%s", detected)
-		}
 	}
 	logging.Infof("starting node uri=%s listen=%s tracker_configured=%t manual_seeds=%d log_level=%s auth=%t region=%s",
 		cfg.NodeURI, cfg.ListenAddr, cfg.TrackerURL != "", len(cfg.ManualSeeds), cfg.LogLevel, cfg.Auth.Enabled, cfg.NodeRegion)
