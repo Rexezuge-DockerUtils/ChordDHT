@@ -587,6 +587,8 @@ func (n *Node) ReportToTracker() {
 	if n.predecessor != nil {
 		predecessorID = stringPtrIfNotEmpty(n.predecessor.NodeID)
 	}
+	maintenanceMode := n.maintenanceMode
+	predecessorListSize := len(n.predecessorList)
 	heartbeat := TrackerHeartbeat{
 		Status:                status,
 		SuccessorID:           successorID,
@@ -598,8 +600,14 @@ func (n *Node) ReportToTracker() {
 		MaintenanceCycles:     n.maintenanceCycles.Load(),
 		CertExpiresAt:         n.options.NodeCertExpiresAt,
 		Region:                n.region,
+		MaintenanceMode:       maintenanceMode,
+		PredecessorListSize:   predecessorListSize,
 	}
 	n.mu.RUnlock()
+
+	if n.routingCache != nil {
+		heartbeat.CacheHits, heartbeat.CacheMisses, heartbeat.CacheSize = n.routingCache.Stats()
+	}
 	if err := n.tracker.Heartbeat(n.self.NodeID, heartbeat); err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.Code == ErrNodeNotFound {
