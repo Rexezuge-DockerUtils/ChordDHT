@@ -128,9 +128,11 @@ func main() {
 
 	// --- Tracker ---
 	var tracker chord.TrackerClient
+	var trackerClient *client.TrackerClient
 	if cfg.TrackerURL != "" {
 		logging.Infof("using tracker url=%s", cfg.TrackerURL)
-		trackerClient, err := client.NewTrackerClient(cfg.TrackerURL, cfg.HTTPTimeout, cfg.SkipTLSVerify)
+		var err error
+		trackerClient, err = client.NewTrackerClient(cfg.TrackerURL, cfg.HTTPTimeout, cfg.SkipTLSVerify)
 		if err != nil {
 			log.Fatalf("invalid tracker URL: %v", err)
 		}
@@ -140,6 +142,13 @@ func main() {
 	}
 
 	peerClient := client.NewChordClient(cfg.HTTPTimeout, cfg.SkipTLSVerify, signer)
+	if cfg.NodeRegion == "" && trackerClient != nil {
+		if region, err := trackerClient.DetectRegion(); err == nil && region != "" {
+			cfg.NodeRegion = region
+			chordOpts.Region = region
+			logging.Infof("auto-detected node region from tracker region=%s", region)
+		}
+	}
 	peerClient.SetSelfRegion(cfg.NodeRegion)
 	peerClient.SetTimeoutConfig(client.TimeoutConfig{
 		PingSame:           cfg.TimeoutPingSameRegion,
