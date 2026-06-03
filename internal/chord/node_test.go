@@ -42,25 +42,25 @@ func TestNotifyAcceptsCloserPredecessor(t *testing.T) {
 // errClient is a PeerClient that fails every call, used to simulate an unreachable peer.
 type errClient struct{}
 
-func (errClient) Ping(_ string) error                                              { return errors.New("unreachable") }
-func (errClient) PingWithLatency(_ string) (int64, error)                         { return 0, errors.New("unreachable") }
-func (errClient) FindSuccessor(_ string, _ FindSuccessorRequest) (FindSuccessorResponse, error) {
+func (errClient) Ping(_ string) error             { return errors.New("unreachable") }
+func (errClient) PingWithLatency(_ string) (int64, error) { return 0, errors.New("unreachable") }
+func (errClient) FindSuccessor(_ NodeInfo, _ FindSuccessorRequest) (FindSuccessorResponse, error) {
 	return FindSuccessorResponse{}, errors.New("unreachable")
 }
 func (errClient) Join(_ string, _ JoinRequest) (JoinResponse, error) {
 	return JoinResponse{}, errors.New("unreachable")
 }
-func (errClient) Notify(_ string, _ NotifyRequest) (NotifyResponse, error) {
+func (errClient) Notify(_ NodeInfo, _ NotifyRequest) (NotifyResponse, error) {
 	return NotifyResponse{}, errors.New("unreachable")
 }
-func (errClient) Predecessor(_ string) (PredecessorResponse, error) {
+func (errClient) Predecessor(_ NodeInfo) (PredecessorResponse, error) {
 	return PredecessorResponse{}, errors.New("unreachable")
 }
-func (errClient) SuccessorList(_ string) (SuccessorListResponse, error) {
+func (errClient) SuccessorList(_ NodeInfo) (SuccessorListResponse, error) {
 	return SuccessorListResponse{}, errors.New("unreachable")
 }
-func (errClient) Leave(_ string, _ LeaveRequest) error { return errors.New("unreachable") }
-func (errClient) RTT(_ string) (RTTResponse, error)    { return RTTResponse{}, errors.New("unreachable") }
+func (errClient) Leave(_ NodeInfo, _ LeaveRequest) error { return errors.New("unreachable") }
+func (errClient) RTT(_ string) (RTTResponse, error)      { return RTTResponse{}, errors.New("unreachable") }
 
 // TestStabilizeIsolatesWhenAllPeersFail verifies that a node transitions to
 // StatusIsolated (not stays ACTIVE) when its successor and all backups are unreachable.

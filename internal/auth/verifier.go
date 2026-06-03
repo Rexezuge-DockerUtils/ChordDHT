@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -22,7 +23,25 @@ type VerifierConfig struct {
 	NonceCache         *NonceCache
 	CertCache          *CertCache
 	ToleranceSecs      int
-	BootGracePeriodEnd time.Time // zero value = no grace period
+	BootGracePeriodEnd time.Time    // zero value = no grace period
+	ClockSkewTolerance time.Duration // v4.0: tolerance for VNodeProof expiry check (default 30s)
+}
+
+// vnodeProofPayload is the local deserialization target for X-Chord-VNode-Proof headers.
+type vnodeProofPayload struct {
+	VNodeID   string `json:"vnode_id"`
+	AnchorID  string `json:"anchor_id"`
+	Index     int    `json:"index"`
+	IssuedAt  int64  `json:"issued_at"`
+	ExpiresAt int64  `json:"expires_at"`
+	AnchorPub string `json:"anchor_pub"`
+	Signature string `json:"signature"`
+}
+
+func deriveVNodeID(anchorID string, index int) string {
+	input := fmt.Sprintf("chord-vnode-v4\n%s\n%d", anchorID, index)
+	h := sha1.Sum([]byte(input))
+	return hex.EncodeToString(h[:])
 }
 
 // RequestVerifier is an HTTP middleware that enforces v2.0 request authentication.
@@ -62,10 +81,20 @@ func (v *RequestVerifier) CacheIncomingCert(cert *Certificate) {
 }
 
 // Middleware returns an http.Handler that enforces authentication on all paths except
-// those listed in exemptPaths.
-func (v *RequestVerifier) Middleware(next http.Handler, exemptPaths map[string]bool) http.Handler {
+// those matched by isExempt. isExempt may be a function(path string) bool or a
+// map[string]bool; both are accepted for backwards compatibility.
+func (v *RequestVerifier) Middleware(next http.Handler, isExempt any) http.Handler {
+	var exemptFn func(string) bool
+	switch e := isExempt.(type) {
+	case func(string) bool:
+		exemptFn = e
+	case map[string]bool:
+		exemptFn = func(path string) bool { return e[path] }
+	default:
+		exemptFn = func(string) bool { return false }
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if exemptPaths[r.URL.Path] {
+		if exemptFn(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -175,6 +204,61 @@ func (v *RequestVerifier) Middleware(next http.Handler, exemptPaths map[string]b
 		if !ed25519.Verify(pubKey, msg, sigBytes) {
 			writeAuthError(w, http.StatusUnauthorized, "INVALID_SIGNATURE", "request signature verification failed")
 			return
+		}
+
+		// Step 8 (v4.0): VNodeProof verification.
+		// When X-Chord-VNode-Proof is present and anchor_id != node_id, the request
+		// is from a vnode; verify the proof using the anchor's public key.
+		anchorIDHeader := r.Header.Get("X-Chord-Anchor-ID")
+		vnodeProofHeader := r.Header.Get("X-Chord-VNode-Proof")
+		if vnodeProofHeader != "" && anchorIDHeader != "" && anchorIDHeader != nodeID {
+			proofBytes, err := base64.StdEncoding.DecodeString(vnodeProofHeader)
+			if err != nil {
+				writeAuthError(w, http.StatusForbidden, "INVALID_VNODE_PROOF", "malformed proof header")
+				return
+			}
+			var proof vnodeProofPayload
+			if err := json.Unmarshal(proofBytes, &proof); err != nil {
+				writeAuthError(w, http.StatusForbidden, "INVALID_VNODE_PROOF", "invalid proof JSON")
+				return
+			}
+			// Expiry check with clock skew tolerance.
+			skew := v.cfg.ClockSkewTolerance
+			if skew <= 0 {
+				skew = 30 * time.Second
+			}
+			if proof.ExpiresAt+int64(skew.Seconds()) < now.Unix() {
+				writeAuthError(w, http.StatusForbidden, "PROOF_EXPIRED", "vnode proof has expired")
+				return
+			}
+			// Recompute expected vnode_id.
+			expected := deriveVNodeID(proof.AnchorID, proof.Index)
+			if expected != proof.VNodeID || proof.VNodeID != nodeID {
+				writeAuthError(w, http.StatusForbidden, "INVALID_VNODE_PROOF", "vnode_id mismatch")
+				return
+			}
+			// Fetch anchor's certificate to get public key.
+			anchorCert, ok := v.cfg.CertCache.Get(anchorIDHeader, now)
+			if !ok {
+				writeAuthError(w, http.StatusForbidden, "INVALID_VNODE_PROOF", "anchor certificate not cached; resend with X-Chord-Certificate")
+				return
+			}
+			anchorPub, err := anchorCert.NodePublicKey()
+			if err != nil {
+				writeAuthError(w, http.StatusForbidden, "INVALID_VNODE_PROOF", "cannot decode anchor public key")
+				return
+			}
+			canonical := fmt.Sprintf("chord-vnode-proof-v4\n%s\n%s\n%d\n%d\n%d",
+				proof.VNodeID, proof.AnchorID, proof.Index, proof.IssuedAt, proof.ExpiresAt)
+			proofSig, err := base64.StdEncoding.DecodeString(proof.Signature)
+			if err != nil || len(proofSig) != ed25519.SignatureSize {
+				writeAuthError(w, http.StatusForbidden, "INVALID_VNODE_PROOF", "malformed proof signature")
+				return
+			}
+			if !ed25519.Verify(anchorPub, []byte(canonical), proofSig) {
+				writeAuthError(w, http.StatusForbidden, "INVALID_VNODE_PROOF", "proof signature verification failed")
+				return
+			}
 		}
 
 		next.ServeHTTP(w, r)

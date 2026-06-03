@@ -27,6 +27,32 @@ type Options struct {
 	// (or nil if no CRL is available). May be nil.
 	OnCRLRefresh func(crlJSON []byte)
 
+	// v4.0 vnode options
+	VNodeIndex              int           // 0 = anchor; 1+ = vnode
+	AnchorID                string        // empty for anchors
+	VNodeProofPtr           *VNodeProof   // current VNodeProof; nil for anchors
+	MaxVNodes               int
+	VNodeProofTTL           time.Duration
+	VNodeProofRenewBefore   time.Duration
+	ClockSkewTolerance      time.Duration
+	VNodeGoroutineLimit     int
+	VNodeMaintenanceJitter  time.Duration
+	SiblingRouteMaxHops     int
+	SuccessorListSiblingCap float64
+	VNodeBootstrapPreferExt bool
+	SharedNodeInfoCacheSize  int
+	SharedNodeInfoCacheTTL   time.Duration
+	SharedRTTCacheTTL        time.Duration
+	SharedRouteCacheSize     int
+	SharedRouteCacheTTL      time.Duration
+	SharedProofVerifyCacheSize int
+	TransferTimeout          time.Duration
+	// Shared L0 resources; set on vnodes to share the anchor's caches.
+	SharedRTTCache    *RTTCache
+	SharedRoutingCache *RoutingCache
+	// VNodeEntries allows the anchor to include its vnodes in tracker registration.
+	VNodeEntries []VNodeEntry
+
 	// v3.0 options
 	Region                          string
 	PredecessorListSize             int
@@ -134,9 +160,20 @@ type Node struct {
 }
 
 func NewNode(uri string, opts Options, client PeerClient, tracker TrackerClient) (*Node, error) {
-	self, err := NewNodeInfoFromURI(uri)
-	if err != nil {
-		return nil, err
+	var self NodeInfo
+	var err error
+	if opts.AnchorID != "" && opts.VNodeIndex > 0 {
+		// Vnode: derive ID deterministically; share the anchor's physical URI.
+		normalized, err := NormalizeURI(uri)
+		if err != nil {
+			return nil, err
+		}
+		self = NodeInfo{NodeID: DeriveVNodeID(opts.AnchorID, opts.VNodeIndex), URI: normalized}
+	} else {
+		self, err = NewNodeInfoFromURI(uri)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if opts.SuccessorListSize <= 0 {
 		opts.SuccessorListSize = DefaultSuccessorListSize
@@ -160,8 +197,16 @@ func NewNode(uri string, opts Options, client PeerClient, tracker TrackerClient)
 		fingers[i] = FingerEntry{Index: i, Start: start, Node: self.Core(), Status: FingerUnknown}
 	}
 
+	// Use shared L0 caches when provided (vnode mode), otherwise create new ones.
+	rttCache := opts.SharedRTTCache
+	if rttCache == nil {
+		rttCache = NewRTTCache(opts.RTTEWMAAlpha, opts.RTTSampleExpiry)
+	}
+
 	var rc *RoutingCache
-	if opts.RoutingCacheEnabled {
+	if opts.SharedRoutingCache != nil {
+		rc = opts.SharedRoutingCache
+	} else if opts.RoutingCacheEnabled {
 		rc = NewRoutingCache(opts.RoutingCacheSize, opts.RoutingCacheTTL)
 	}
 
@@ -180,7 +225,7 @@ func NewNode(uri string, opts Options, client PeerClient, tracker TrackerClient)
 		region:           opts.Region,
 		maintenanceMode:  QuietMaintenance,
 		topologyChangeCh: make(chan struct{}, 1),
-		rttCache:         NewRTTCache(opts.RTTEWMAAlpha, opts.RTTSampleExpiry),
+		rttCache:         rttCache,
 		routingCache:     rc,
 	}
 	n.self.Region = opts.Region
@@ -210,6 +255,10 @@ func ValidateNodeInfo(node NodeInfo) error {
 	if normalized != node.URI {
 		return errors.New("uri must be normalized")
 	}
+	// Vnodes have a derived node_id (not sha1(uri)); skip the URI check.
+	if node.AnchorID != "" {
+		return nil
+	}
 	expected, err := HashURI(node.URI)
 	if err != nil {
 		return err
@@ -230,7 +279,36 @@ func (n *Node) identityLocked() NodeInfo {
 	info := n.self
 	info.Status = n.status
 	info.JoinedAt = n.joinedAt
+	if n.options.AnchorID != "" {
+		info.AnchorID = n.options.AnchorID
+		info.VNodeProof = n.options.VNodeProofPtr
+	}
 	return info
+}
+
+// IsVNode reports whether this node is a virtual node (not the anchor).
+func (n *Node) IsVNode() bool {
+	return n.options.VNodeIndex > 0 && n.options.AnchorID != ""
+}
+
+// VNodeInfo returns metadata about this vnode; only valid when IsVNode() is true.
+func (n *Node) VNodeInfo() VNodeInfoResponse {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return VNodeInfoResponse{
+		VNodeID:   n.self.NodeID,
+		AnchorID:  n.options.AnchorID,
+		Index:     n.options.VNodeIndex,
+		Proof:     n.options.VNodeProofPtr,
+		AnchorURI: n.self.URI,
+	}
+}
+
+// SetVNodeEntries updates the list of vnode entries the anchor sends to the tracker.
+func (n *Node) SetVNodeEntries(entries []VNodeEntry) {
+	n.mu.Lock()
+	n.options.VNodeEntries = entries
+	n.mu.Unlock()
 }
 
 func (n *Node) State() StateResponse {
@@ -416,7 +494,7 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 		n.status = StatusActive
 		n.mu.Unlock()
 		logging.Infof("joined network via seed=%s successor=%s successor_list_size=%d", seed.NodeID, resp.Successor.NodeID, len(resp.SuccessorList))
-		_, _ = n.client.Notify(resp.Successor.URI, NotifyRequest{Node: selfWithCert})
+		_, _ = n.client.Notify(resp.Successor, NotifyRequest{Node: selfWithCert})
 		n.registerTracker()
 		go n.warmUpFingerTable()
 		return nil
@@ -432,8 +510,15 @@ func (n *Node) registerTracker() {
 	if n.tracker == nil {
 		return
 	}
-	self := n.Self().Core()
+	self := n.Self()
 	self.Certificate = n.options.NodeCertificate
+	// Attach vnode entries when registering as an anchor.
+	n.mu.RLock()
+	vnodes := n.options.VNodeEntries
+	n.mu.RUnlock()
+	if len(vnodes) > 0 {
+		self.Vnodes = vnodes
+	}
 	region, err := n.tracker.Register(self)
 	if err != nil {
 		logging.Warnf("tracker registration failed node_id=%s error=%v", self.NodeID, err)

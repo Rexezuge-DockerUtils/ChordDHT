@@ -3,6 +3,7 @@ package chord
 import (
 	"context"
 	"errors"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -10,7 +11,23 @@ import (
 )
 
 // RunMaintenance launches all maintenance goroutines. They run until ctx is cancelled.
+// For vnodes (VNodeIndex > 0), an initial stagger delay is applied to spread maintenance
+// load across the physical host.
 func (n *Node) RunMaintenance(ctx context.Context) {
+	if n.options.VNodeIndex > 0 && n.options.MaxVNodes > 0 {
+		baseInterval := n.getStabilizeInterval()
+		offset := time.Duration(n.options.VNodeIndex) * baseInterval / time.Duration(n.options.MaxVNodes+1)
+		jitterMax := n.options.VNodeMaintenanceJitter
+		if jitterMax <= 0 {
+			jitterMax = DefaultVNodeMaintenanceJitter
+		}
+		jitter := time.Duration(rand.Int63n(int64(jitterMax)))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(offset + jitter):
+		}
+	}
 	go n.runModeManager(ctx)
 	go n.runStabilizeLoop(ctx)
 	go n.runFixFingersLoop(ctx)
@@ -319,9 +336,9 @@ func (n *Node) Stabilize() {
 			successor := pred.Core()
 			selfWithCert := self
 			selfWithCert.Certificate = n.options.NodeCertificate
-			_, _ = n.client.Notify(successor.URI, NotifyRequest{Node: selfWithCert})
+			_, _ = n.client.Notify(successor, NotifyRequest{Node: selfWithCert})
 			list := []NodeInfo{successor}
-			if resp, err := n.client.SuccessorList(successor.URI); err == nil {
+			if resp, err := n.client.SuccessorList(successor); err == nil {
 				list = append(list, resp.SuccessorList...)
 			}
 			n.mu.Lock()
@@ -338,7 +355,7 @@ func (n *Node) Stabilize() {
 		if n.client == nil {
 			break
 		}
-		predResp, err := n.client.Predecessor(candidate.URI)
+		predResp, err := n.client.Predecessor(candidate)
 		if err != nil {
 			failures, evicted := n.markFailure(candidate.NodeID)
 			if evicted {
@@ -356,9 +373,9 @@ func (n *Node) Stabilize() {
 		}
 		selfWithCert := self
 		selfWithCert.Certificate = n.options.NodeCertificate
-		_, _ = n.client.Notify(successor.URI, NotifyRequest{Node: selfWithCert})
+		_, _ = n.client.Notify(successor, NotifyRequest{Node: selfWithCert})
 		list := []NodeInfo{successor}
-		if resp, err := n.client.SuccessorList(successor.URI); err == nil {
+		if resp, err := n.client.SuccessorList(successor); err == nil {
 			list = append(list, resp.SuccessorList...)
 		}
 		n.mu.Lock()
@@ -671,14 +688,14 @@ func (n *Node) GracefulLeave() {
 	n.mu.Unlock()
 	if n.client != nil {
 		if successor.NodeID != "" && successor.NodeID != self.NodeID {
-			if err := n.client.Leave(successor.URI, LeaveRequest{Role: "predecessor_leaving", NewPredecessor: predecessor}); err != nil {
+			if err := n.client.Leave(successor, LeaveRequest{Role: "predecessor_leaving", NewPredecessor: predecessor}); err != nil {
 				logging.Warnf("failed to notify successor during leave node_id=%s error=%v", successor.NodeID, err)
 			} else {
 				logging.Infof("notified successor during leave node_id=%s", successor.NodeID)
 			}
 		}
 		if predecessor != nil && predecessor.NodeID != self.NodeID {
-			if err := n.client.Leave(predecessor.URI, LeaveRequest{Role: "successor_leaving", NewSuccessor: &successor}); err != nil {
+			if err := n.client.Leave(*predecessor, LeaveRequest{Role: "successor_leaving", NewSuccessor: &successor}); err != nil {
 				logging.Warnf("failed to notify predecessor during leave node_id=%s error=%v", predecessor.NodeID, err)
 			} else {
 				logging.Infof("notified predecessor during leave node_id=%s", predecessor.NodeID)
