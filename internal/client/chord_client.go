@@ -114,6 +114,16 @@ func (c *ChordClient) endpointFor(uri, op string) (jsonClient, error) {
 	return newJSONClient(uri, c.timeoutFor(op, uri), c.skipTLSVerify, c.signer)
 }
 
+// pathFor returns the correct HTTP path for an operation on target.
+// For vnodes (AnchorID set), it uses /chord/node/{id}/{op}.
+// For anchors, it uses /chord/{op} (backwards-compatible).
+func pathFor(target chord.NodeInfo, op string) string {
+	if target.AnchorID != "" {
+		return "/chord/node/" + target.NodeID + "/" + op
+	}
+	return "/chord/" + op
+}
+
 func (c *ChordClient) Ping(uri string) error {
 	endpoint, err := c.endpointFor(uri, "ping")
 	if err != nil {
@@ -144,15 +154,16 @@ func (c *ChordClient) RTT(uri string) (chord.RTTResponse, error) {
 	return resp, err
 }
 
-func (c *ChordClient) FindSuccessor(uri string, req chord.FindSuccessorRequest) (chord.FindSuccessorResponse, error) {
-	endpoint, err := c.endpointFor(uri, "find_successor")
+func (c *ChordClient) FindSuccessor(target chord.NodeInfo, req chord.FindSuccessorRequest) (chord.FindSuccessorResponse, error) {
+	endpoint, err := c.endpointFor(target.URI, "find_successor")
 	if err != nil {
 		return chord.FindSuccessorResponse{}, err
 	}
+	path := pathFor(target, "find_successor")
 	var resp chord.FindSuccessorResponse
-	err = endpoint.doSigned(http.MethodPost, "/chord/find_successor", req, &resp, false)
+	err = endpoint.doSigned(http.MethodPost, path, req, &resp, false)
 	if isCertRequired(err) {
-		err = endpoint.doSigned(http.MethodPost, "/chord/find_successor", req, &resp, true)
+		err = endpoint.doSigned(http.MethodPost, path, req, &resp, true)
 	}
 	return resp, err
 }
@@ -163,56 +174,59 @@ func (c *ChordClient) Join(uri string, req chord.JoinRequest) (chord.JoinRespons
 		return chord.JoinResponse{}, err
 	}
 	var resp chord.JoinResponse
-	// Join always sends the cert in the body; also include X-Chord-Certificate on first try.
+	// Join always targets the anchor; always sends the cert on first try.
 	err = endpoint.doSigned(http.MethodPost, "/chord/join", req, &resp, true)
 	return resp, err
 }
 
-func (c *ChordClient) Notify(uri string, req chord.NotifyRequest) (chord.NotifyResponse, error) {
-	endpoint, err := c.endpoint(uri)
+func (c *ChordClient) Notify(target chord.NodeInfo, req chord.NotifyRequest) (chord.NotifyResponse, error) {
+	endpoint, err := c.endpoint(target.URI)
 	if err != nil {
 		return chord.NotifyResponse{}, err
 	}
+	path := pathFor(target, "notify")
 	var resp chord.NotifyResponse
-	// Notify always sends cert in body; include header on first try.
-	err = endpoint.doSigned(http.MethodPost, "/chord/notify", req, &resp, true)
+	err = endpoint.doSigned(http.MethodPost, path, req, &resp, true)
 	return resp, err
 }
 
-func (c *ChordClient) Predecessor(uri string) (chord.PredecessorResponse, error) {
-	endpoint, err := c.endpoint(uri)
+func (c *ChordClient) Predecessor(target chord.NodeInfo) (chord.PredecessorResponse, error) {
+	endpoint, err := c.endpoint(target.URI)
 	if err != nil {
 		return chord.PredecessorResponse{}, err
 	}
+	path := pathFor(target, "predecessor")
 	var resp chord.PredecessorResponse
-	err = endpoint.doSigned(http.MethodGet, "/chord/predecessor", nil, &resp, false)
+	err = endpoint.doSigned(http.MethodGet, path, nil, &resp, false)
 	if isCertRequired(err) {
-		err = endpoint.doSigned(http.MethodGet, "/chord/predecessor", nil, &resp, true)
+		err = endpoint.doSigned(http.MethodGet, path, nil, &resp, true)
 	}
 	return resp, err
 }
 
-func (c *ChordClient) SuccessorList(uri string) (chord.SuccessorListResponse, error) {
-	endpoint, err := c.endpoint(uri)
+func (c *ChordClient) SuccessorList(target chord.NodeInfo) (chord.SuccessorListResponse, error) {
+	endpoint, err := c.endpoint(target.URI)
 	if err != nil {
 		return chord.SuccessorListResponse{}, err
 	}
+	path := pathFor(target, "successor_list")
 	var resp chord.SuccessorListResponse
-	err = endpoint.doSigned(http.MethodGet, "/chord/successor_list", nil, &resp, false)
+	err = endpoint.doSigned(http.MethodGet, path, nil, &resp, false)
 	if isCertRequired(err) {
-		err = endpoint.doSigned(http.MethodGet, "/chord/successor_list", nil, &resp, true)
+		err = endpoint.doSigned(http.MethodGet, path, nil, &resp, true)
 	}
 	return resp, err
 }
 
-func (c *ChordClient) Leave(uri string, req chord.LeaveRequest) error {
-	endpoint, err := c.endpoint(uri)
+func (c *ChordClient) Leave(target chord.NodeInfo, req chord.LeaveRequest) error {
+	endpoint, err := c.endpoint(target.URI)
 	if err != nil {
 		return err
 	}
-	err = endpoint.doSigned(http.MethodPost, "/chord/leave", req, &chord.LeaveResponse{}, false)
+	path := pathFor(target, "leave")
+	err = endpoint.doSigned(http.MethodPost, path, req, &chord.LeaveResponse{}, false)
 	if isCertRequired(err) {
-		err = endpoint.doSigned(http.MethodPost, "/chord/leave", req, &chord.LeaveResponse{}, true)
+		err = endpoint.doSigned(http.MethodPost, path, req, &chord.LeaveResponse{}, true)
 	}
 	return err
 }

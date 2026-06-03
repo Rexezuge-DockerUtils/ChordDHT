@@ -58,6 +58,25 @@ type Config struct {
 	TrackerSeedCount    int
 	Auth                AuthConfig
 
+	// v4.0 vnode fields
+	VNodeCount                    int
+	MaxVNodes                     int
+	VNodeProofTTL                 time.Duration
+	VNodeProofRenewBefore         time.Duration
+	ClockSkewTolerance            time.Duration
+	VNodeGoroutineLimit           int
+	VNodeMaintenanceJitter        time.Duration
+	SiblingRouteMaxHops           int
+	SuccessorListSiblingCap       float64
+	VNodeBootstrapPreferExt       bool
+	SharedNodeInfoCacheSize       int
+	SharedNodeInfoCacheTTL        time.Duration
+	SharedRTTCacheTTL             time.Duration
+	SharedRouteCacheSize          int
+	SharedRouteCacheTTL           time.Duration
+	SharedProofVerifyCacheSize    int
+	TransferTimeout               time.Duration
+
 	// v3.0 fields
 	NodeRegion                         string
 	PredecessorListSize                int
@@ -122,6 +141,25 @@ func Load() (Config, error) {
 	flag.BoolVar(&cfg.Auth.CRLRefreshFromTracker, "auth.crl-refresh-from-tracker", envBool("CHORD_AUTH_CRL_REFRESH", true), "auto-refresh CRL from tracker")
 	flag.IntVar(&cfg.Auth.CertExpiryWarnDays, "auth.cert-expiry-warn-days", envInt("CHORD_AUTH_CERT_EXPIRY_WARN", 30), "days before cert expiry to warn")
 	flag.IntVar(&cfg.Auth.BootGracePeriodSecs, "auth.boot-grace-period-secs", envInt("CHORD_AUTH_BOOT_GRACE", 0), "seconds after startup before auth is enforced")
+
+	// v4.0 flags
+	flag.IntVar(&cfg.VNodeCount, "vnode-count", envInt("CHORD_VNODE_COUNT", 0), "number of virtual nodes to spawn (0 = pure anchor mode)")
+	flag.IntVar(&cfg.MaxVNodes, "max-vnodes", envInt("CHORD_MAX_VNODES", 8), "maximum vnodes allowed per anchor")
+	flag.DurationVar(&cfg.VNodeProofTTL, "vnodeproof-ttl", envDuration("CHORD_VNODEPROOF_TTL", 86400*time.Second), "VNodeProof validity period")
+	flag.DurationVar(&cfg.VNodeProofRenewBefore, "vnodeproof-renew-before", envDuration("CHORD_VNODEPROOF_RENEW_BEFORE", 3600*time.Second), "seconds before expiry to renew VNodeProof")
+	flag.DurationVar(&cfg.ClockSkewTolerance, "clock-skew-tolerance", envDuration("CHORD_CLOCK_SKEW_TOLERANCE", 30*time.Second), "VNodeProof expiry clock skew tolerance")
+	flag.IntVar(&cfg.VNodeGoroutineLimit, "vnode-goroutine-limit", envInt("CHORD_VNODE_GOROUTINE_LIMIT", 32), "max concurrent goroutines per vnode")
+	flag.DurationVar(&cfg.VNodeMaintenanceJitter, "vnode-maintenance-jitter", envDuration("CHORD_VNODE_MAINTENANCE_JITTER", 5*time.Second), "vnode maintenance startup jitter range")
+	flag.IntVar(&cfg.SiblingRouteMaxHops, "sibling-route-max-hops", envInt("CHORD_SIBLING_ROUTE_MAX_HOPS", 2), "max consecutive same-anchor vnode hops in routing")
+	flag.Float64Var(&cfg.SuccessorListSiblingCap, "successor-list-sibling-cap", envFloat("CHORD_SUCCESSOR_LIST_SIBLING_CAP", 0.5), "max fraction of successor list entries from same anchor")
+	flag.BoolVar(&cfg.VNodeBootstrapPreferExt, "vnode-bootstrap-prefer-external", envBool("CHORD_VNODE_BOOTSTRAP_PREFER_EXT", true), "prefer non-sibling bootstrap nodes when vnode joins")
+	flag.IntVar(&cfg.SharedNodeInfoCacheSize, "shared-nodeinfo-cache-size", envInt("CHORD_SHARED_NODEINFO_CACHE_SIZE", 2048), "L0 NodeInfo cache capacity")
+	flag.DurationVar(&cfg.SharedNodeInfoCacheTTL, "shared-nodeinfo-cache-ttl", envDuration("CHORD_SHARED_NODEINFO_CACHE_TTL", 30*time.Second), "L0 NodeInfo cache TTL")
+	flag.DurationVar(&cfg.SharedRTTCacheTTL, "shared-rtt-cache-ttl", envDuration("CHORD_SHARED_RTT_CACHE_TTL", 60*time.Second), "L0 RTT cache TTL")
+	flag.IntVar(&cfg.SharedRouteCacheSize, "shared-route-cache-size", envInt("CHORD_SHARED_ROUTE_CACHE_SIZE", 1024), "L0 routing LRU cache capacity")
+	flag.DurationVar(&cfg.SharedRouteCacheTTL, "shared-route-cache-ttl", envDuration("CHORD_SHARED_ROUTE_CACHE_TTL", 10*time.Second), "L0 routing cache TTL")
+	flag.IntVar(&cfg.SharedProofVerifyCacheSize, "shared-proof-verify-cache-size", envInt("CHORD_SHARED_PROOF_VERIFY_CACHE_SIZE", 256), "L0 VNodeProof verify cache capacity")
+	flag.DurationVar(&cfg.TransferTimeout, "transfer-timeout", envDuration("CHORD_TRANSFER_TIMEOUT", 30*time.Second), "key transfer ACK timeout")
 
 	// v3.0 flags
 	flag.StringVar(&cfg.NodeRegion, "node-region", env("CHORD_NODE_REGION", ""), "node region label (auto-detected from tracker when empty)")
@@ -206,6 +244,24 @@ func Load() (Config, error) {
 
 func (c Config) ChordOptions() chord.Options {
 	return chord.Options{
+		// v4.0 vnode options
+		MaxVNodes:               c.MaxVNodes,
+		VNodeProofTTL:           c.VNodeProofTTL,
+		VNodeProofRenewBefore:   c.VNodeProofRenewBefore,
+		ClockSkewTolerance:      c.ClockSkewTolerance,
+		VNodeGoroutineLimit:     c.VNodeGoroutineLimit,
+		VNodeMaintenanceJitter:  c.VNodeMaintenanceJitter,
+		SiblingRouteMaxHops:     c.SiblingRouteMaxHops,
+		SuccessorListSiblingCap: c.SuccessorListSiblingCap,
+		VNodeBootstrapPreferExt: c.VNodeBootstrapPreferExt,
+		SharedNodeInfoCacheSize:  c.SharedNodeInfoCacheSize,
+		SharedNodeInfoCacheTTL:   c.SharedNodeInfoCacheTTL,
+		SharedRTTCacheTTL:        c.SharedRTTCacheTTL,
+		SharedRouteCacheSize:     c.SharedRouteCacheSize,
+		SharedRouteCacheTTL:      c.SharedRouteCacheTTL,
+		SharedProofVerifyCacheSize: c.SharedProofVerifyCacheSize,
+		TransferTimeout:          c.TransferTimeout,
+
 		SuccessorListSize:   c.SuccessorListSize,
 		MaintenanceInterval: c.MaintenanceInterval,
 		MaxHops:             c.MaxHops,

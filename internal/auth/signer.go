@@ -14,9 +14,12 @@ import (
 
 // RequestSigner signs outbound Chord HTTP requests with Ed25519.
 type RequestSigner struct {
-	nodeID  string
-	privKey ed25519.PrivateKey
-	cert    *Certificate
+	nodeID     string
+	privKey    ed25519.PrivateKey
+	cert       *Certificate
+	// v4.0 vnode fields; empty for anchors.
+	anchorID   string
+	vnodeProof string // base64 std JSON of VNodeProof
 }
 
 // NewRequestSigner creates a signer for outbound requests.
@@ -54,7 +57,19 @@ func (s *RequestSigner) Sign(req *http.Request, bodyBytes []byte) error {
 	req.Header.Set("X-Chord-Timestamp", timestamp)
 	req.Header.Set("X-Chord-Nonce", nonce)
 	req.Header.Set("X-Chord-Signature", base64.RawURLEncoding.EncodeToString(sig))
+	// v4.0: add vnode identity headers when signing as a vnode.
+	if s.anchorID != "" {
+		req.Header.Set("X-Chord-Anchor-ID", s.anchorID)
+		req.Header.Set("X-Chord-VNode-Proof", s.vnodeProof)
+	}
 	return nil
+}
+
+// SetVNodeInfo configures the signer to attach VNode identity headers on outbound requests.
+// anchorID is the anchor's node_id; proofBase64 is the base64-encoded VNodeProof JSON.
+func (s *RequestSigner) SetVNodeInfo(anchorID, proofBase64 string) {
+	s.anchorID = anchorID
+	s.vnodeProof = proofBase64
 }
 
 // AddCertHeader sets X-Chord-Certificate on req with the signer's certificate.

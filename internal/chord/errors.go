@@ -13,6 +13,9 @@ const (
 	ErrLoopDetected    = "LOOP_DETECTED"
 	ErrUpstream        = "UPSTREAM_ERROR"
 
+	ErrInvalidVNodeProof = "INVALID_VNODE_PROOF"
+	ErrProofExpired      = "PROOF_EXPIRED"
+
 	ErrMissingAuthHeaders   = "MISSING_AUTH_HEADERS"
 	ErrTimestampOutOfWindow = "TIMESTAMP_OUT_OF_WINDOW"
 	ErrNonceReused          = "NONCE_REUSED"

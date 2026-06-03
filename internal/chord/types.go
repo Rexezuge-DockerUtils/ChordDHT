@@ -8,6 +8,7 @@ import (
 const (
 	DefaultM                    = 160
 	DefaultSuccessorListSize    = 5
+	DefaultSuccessorListSiblingCap = 0.5
 	DefaultMaintenanceInterval  = 60 * time.Second
 	DefaultHTTPTimeout          = 5 * time.Second
 	DefaultMaxHops              = 161
@@ -39,6 +40,7 @@ const (
 	DefaultLatencyProbeActiveInterval        = 30 * time.Second
 	DefaultLatencyProbeQuietInterval         = 120 * time.Second
 	DefaultStabilizeDebounceThreshold        = 3
+	DefaultVNodeMaintenanceJitter            = 5 * time.Second
 
 	DefaultTimeoutPingSameRegion        = 2 * time.Second
 	DefaultTimeoutPingCrossRegion       = 5 * time.Second
@@ -76,10 +78,22 @@ type NodeInfo struct {
 	Region       string          `json:"region,omitempty"`
 	Version      string          `json:"version,omitempty"`
 	Capabilities []string        `json:"capabilities,omitempty"`
+	// v4.0 vnode fields
+	AnchorID   string       `json:"anchor_id,omitempty"`
+	VNodeProof *VNodeProof  `json:"vnode_proof,omitempty"`
+	Vnodes     []VNodeEntry `json:"vnodes,omitempty"`
+}
+
+// VNodeEntry is a lightweight vnode descriptor carried in an anchor's NodeInfo.
+type VNodeEntry struct {
+	VNodeID string      `json:"vnode_id"`
+	Index   int         `json:"index"`
+	Status  Status      `json:"status,omitempty"`
+	Proof   *VNodeProof `json:"proof,omitempty"`
 }
 
 func (n NodeInfo) Core() NodeInfo {
-	return NodeInfo{NodeID: n.NodeID, URI: n.URI, Region: n.Region}
+	return NodeInfo{NodeID: n.NodeID, URI: n.URI, Region: n.Region, AnchorID: n.AnchorID}
 }
 
 type FingerEntry struct {
@@ -222,15 +236,75 @@ type NodeStatusResponse struct {
 	Region          string          `json:"region"`
 }
 
+// VNodeInfoResponse is returned by GET /chord/node/{vnode_id}/vnode_info.
+type VNodeInfoResponse struct {
+	VNodeID   string      `json:"vnode_id"`
+	AnchorID  string      `json:"anchor_id"`
+	Index     int         `json:"index"`
+	Proof     *VNodeProof `json:"proof,omitempty"`
+	AnchorURI string      `json:"anchor_uri"`
+}
+
+// ListVNodesResponse is returned by GET /chord/node/{anchor_id}/list_vnodes.
+type ListVNodesResponse struct {
+	AnchorID string       `json:"anchor_id"`
+	Vnodes   []VNodeEntry `json:"vnodes"`
+}
+
+// TransferKeyEntry is a single key-value pair in a key-transfer batch.
+type TransferKeyEntry struct {
+	Key     string `json:"key"`
+	Value   string `json:"value,omitempty"`
+	Version int64  `json:"version,omitempty"`
+}
+
+// TransferKeysRequest is sent to push or pull a batch of keys.
+type TransferKeysRequest struct {
+	FromID      string             `json:"from_id"`
+	RangeLo     string             `json:"range_lo"`
+	RangeHi     string             `json:"range_hi"`
+	Entries     []TransferKeyEntry `json:"entries,omitempty"`
+	RequestKeys bool               `json:"request_keys,omitempty"`
+	BatchSeq    int                `json:"batch_seq"`
+	IsLast      bool               `json:"is_last"`
+}
+
+// TransferKeysResponse acknowledges receipt of a key-transfer batch.
+type TransferKeysResponse struct {
+	Received int                `json:"received"`
+	BatchSeq int                `json:"batch_seq"`
+	AckToken string             `json:"ack_token,omitempty"`
+	Entries  []TransferKeyEntry `json:"entries,omitempty"`
+}
+
+// TransferAckRequest signals that all batches have been written successfully.
+type TransferAckRequest struct {
+	FromID    string `json:"from_id"`
+	RangeLo   string `json:"range_lo"`
+	RangeHi   string `json:"range_hi"`
+	TotalKeys int    `json:"total_keys"`
+	AckToken  string `json:"ack_token"`
+}
+
+// TransferAckResponse is the response to a TransferAckRequest.
+type TransferAckResponse struct {
+	Status string `json:"status"`
+}
+
 type PeerClient interface {
 	Ping(uri string) error
 	PingWithLatency(uri string) (int64, error)
-	FindSuccessor(uri string, req FindSuccessorRequest) (FindSuccessorResponse, error)
+	// FindSuccessor routes to the correct vnode path when target.AnchorID is set.
+	FindSuccessor(target NodeInfo, req FindSuccessorRequest) (FindSuccessorResponse, error)
 	Join(uri string, req JoinRequest) (JoinResponse, error)
-	Notify(uri string, req NotifyRequest) (NotifyResponse, error)
-	Predecessor(uri string) (PredecessorResponse, error)
-	SuccessorList(uri string) (SuccessorListResponse, error)
-	Leave(uri string, req LeaveRequest) error
+	// Notify routes to the correct vnode path when target.AnchorID is set.
+	Notify(target NodeInfo, req NotifyRequest) (NotifyResponse, error)
+	// Predecessor routes to the correct vnode path when target.AnchorID is set.
+	Predecessor(target NodeInfo) (PredecessorResponse, error)
+	// SuccessorList routes to the correct vnode path when target.AnchorID is set.
+	SuccessorList(target NodeInfo) (SuccessorListResponse, error)
+	// Leave routes to the correct vnode path when target.AnchorID is set.
+	Leave(target NodeInfo, req LeaveRequest) error
 	RTT(uri string) (RTTResponse, error)
 }
 

@@ -1,6 +1,6 @@
 # ChordDHT
 
-A learning implementation of the [Chord](https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf) distributed hash table protocol (Stoica et al., ACM SIGCOMM 2001), written in Go with no external dependencies. Now at **v3.0** with adaptive maintenance, latency-aware routing, LRU route caching, and enhanced fault tolerance.
+A learning implementation of the [Chord](https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf) distributed hash table protocol (Stoica et al., ACM SIGCOMM 2001), written in Go with no external dependencies. Now at **v4.0** with virtual nodes (VNodes), VNodeProof credentials, shared L0 resources, and sibling diversity constraints.
 
 > **Scope:** Chord ring formation and O(log N) key routing only. No key-value storage. Not intended for production use.
 
@@ -26,6 +26,18 @@ Key protocol parameters:
 | Lookup mode | Iterative + LRU cache | HTTP depth always 1; optional parallel probe |
 | Routing cache | LRU, 1000 entries, 30 s TTL | Interval-aware; cleared on topology change |
 | Region routing | EWMA RTT + region affinity | Score = 0.6·ID + 0.3·RTT + 0.1·region |
+
+### v4.0 additions over v3.0
+
+- **Virtual nodes (VNodes)** — a physical node can occupy N positions in the ring (`--vnode-count=N`; `N=0` is pure anchor mode, fully backwards-compatible)
+- **VNodeProof credentials** — each vnode carries a short-lived Ed25519-signed proof derived from the anchor's certificate; no CA involvement for vnodes
+- **Deterministic vnode IDs** — `SHA1("chord-vnode-v4\n" + anchor_id + "\n" + index)` — survives restarts
+- **Per-node URL routing** — `/chord/node/{node_id}/` prefix routes requests to the correct vnode's state machine; old `/chord/` paths remain as anchor aliases
+- **Shared L0 resources** — RTT cache, routing cache, and NodeInfo cache are shared across all vnodes on one host; finger tables store only 40-char node_id strings (6.4 KB vs 160 KB per vnode)
+- **Sibling diversity constraint** — successor list caps entries from the same anchor at 50% to reduce cascading failures
+- **Staggered vnode maintenance** — startup offsets spread maintenance load across the host
+- **Graceful leave ordering** — vnodes leave in reverse-index order before the anchor
+- **New endpoints** — `GET /chord/node/{id}/vnode_info`, `GET /chord/node/{anchor_id}/list_vnodes`, `POST .../transfer_keys`, `POST .../transfer_ack`
 
 ### v3.0 additions over v2.0
 

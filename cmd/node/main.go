@@ -21,6 +21,57 @@ import (
 	"chorddht/internal/logging"
 )
 
+// spawnVNodes creates vnodes for the anchor, signs their proofs, and joins them to the ring.
+// Returns the vnode slice (may be empty when vnode_count == 0).
+func spawnVNodes(
+	ctx context.Context,
+	cfg config.Config,
+	anchorID string,
+	privKey ed25519.PrivateKey,
+	anchorOpts chord.Options,
+	peerClient *client.ChordClient,
+	tracker chord.TrackerClient,
+) []*chord.Node {
+	count := cfg.VNodeCount
+	if count <= 0 || privKey == nil {
+		return nil
+	}
+	// Create shared L0 resources that all vnodes and the anchor will share.
+	sharedRTT := chord.NewRTTCache(anchorOpts.RTTEWMAAlpha, cfg.SharedRTTCacheTTL)
+	var sharedRoute *chord.RoutingCache
+	if anchorOpts.RoutingCacheEnabled {
+		sharedRoute = chord.NewRoutingCache(cfg.SharedRouteCacheSize, cfg.SharedRouteCacheTTL)
+	}
+
+	vnodes := make([]*chord.Node, 0, count)
+	vnodeEntries := make([]chord.VNodeEntry, 0, count)
+
+	for i := 1; i <= count; i++ {
+		proof := chord.SignVNodeProof(anchorID, i, privKey, anchorOpts.VNodeProofTTL)
+
+		vnodeOpts := anchorOpts
+		vnodeOpts.VNodeIndex = i
+		vnodeOpts.AnchorID = anchorID
+		vnodeOpts.VNodeProofPtr = proof
+		vnodeOpts.SharedRTTCache = sharedRTT
+		vnodeOpts.SharedRoutingCache = sharedRoute
+		// Vnodes use the anchor's certificate and private key for signing.
+
+		vn, err := chord.NewNode(cfg.NodeURI, vnodeOpts, peerClient, tracker)
+		if err != nil {
+			log.Fatalf("failed to create vnode index=%d: %v", i, err)
+		}
+
+		vnodeEntries = append(vnodeEntries, chord.VNodeEntry{
+			VNodeID: vn.Self().NodeID,
+			Index:   i,
+			Proof:   proof,
+		})
+		vnodes = append(vnodes, vn)
+	}
+	return vnodes
+}
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -41,6 +92,7 @@ func main() {
 	// --- Auth setup ---
 	var signer *auth.RequestSigner
 	var verifier *auth.RequestVerifier
+	var nodePrivKey ed25519.PrivateKey
 	chordOpts := cfg.ChordOptions()
 
 	if cfg.Auth.Enabled {
@@ -73,9 +125,9 @@ func main() {
 		if err != nil || len(privKeyBytes) != 64 {
 			log.Fatalf("invalid node private key: must be base64url-encoded 64-byte Ed25519 private key")
 		}
-		privKey := ed25519.PrivateKey(privKeyBytes)
+		nodePrivKey = ed25519.PrivateKey(privKeyBytes)
 
-		signer = auth.NewRequestSigner(nodeCert.NodeID, privKey, nodeCert)
+		signer = auth.NewRequestSigner(nodeCert.NodeID, nodePrivKey, nodeCert)
 
 		nonceCache := auth.NewNonceCache(
 			time.Duration(cfg.Auth.NonceCacheTTLSecs)*time.Second,
@@ -180,12 +232,48 @@ func main() {
 		peerClient.SetSelfRegion(node.Region())
 	}
 
-	go node.RunMaintenance(ctx)
+	// Spawn vnodes (vnode_count=0 → no vnodes, anchor-only mode).
+	vnodes := spawnVNodes(ctx, cfg, node.Self().NodeID, nodePrivKey, chordOpts, peerClient, tracker)
 
-	server := &http.Server{Addr: cfg.ListenAddr, Handler: httpapi.NewServer(node, verifier).Handler()}
+	// If vnodes exist, update signer with vnode info for vnode-originated requests,
+	// and register anchor with the full vnode entry list.
+	if len(vnodes) > 0 {
+		// Build the vnode entry list for tracker registration.
+		vnodeEntries := make([]chord.VNodeEntry, 0, len(vnodes))
+		for _, vn := range vnodes {
+			info := vn.VNodeInfo()
+			vnodeEntries = append(vnodeEntries, chord.VNodeEntry{
+				VNodeID: info.VNodeID,
+				Index:   info.Index,
+				Proof:   info.Proof,
+			})
+		}
+		node.SetVNodeEntries(vnodeEntries)
+
+		// Join each vnode into the ring.
+		for i, vn := range vnodes {
+			logging.Infof("joining vnode index=%d node_id=%s", i+1, vn.Self().NodeID)
+			if err := vn.JoinNetwork(manualSeeds); err != nil {
+				log.Fatalf("vnode join failed index=%d: %v", i+1, err)
+			}
+		}
+	}
+
+	go node.RunMaintenance(ctx)
+	for _, vn := range vnodes {
+		vn := vn
+		go vn.RunMaintenance(ctx)
+	}
+
+	pool := httpapi.NewNodePool(node, vnodes...)
+	server := &http.Server{Addr: cfg.ListenAddr, Handler: httpapi.NewServer(pool, verifier).Handler()}
 	go func() {
 		<-ctx.Done()
 		logging.Infof("shutdown started")
+		// Graceful leave in reverse index order: largest-index vnode first, anchor last.
+		for i := len(vnodes) - 1; i >= 0; i-- {
+			vnodes[i].GracefulLeave()
+		}
 		node.GracefulLeave()
 		if err := server.Shutdown(context.Background()); err != nil {
 			logging.Warnf("server shutdown failed: %v", err)

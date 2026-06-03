@@ -70,7 +70,7 @@ func (n *Node) HandleNotify(req NotifyRequest) (NotifyResponse, error) {
 		// Async: fetch candidate's predecessor to fill predecessorList[1].
 		if n.client != nil {
 			go func() {
-				resp, err := n.client.Predecessor(candidate.URI)
+				resp, err := n.client.Predecessor(candidate)
 				if err == nil && resp.Predecessor != nil && resp.Predecessor.NodeID != n.self.NodeID {
 					n.mu.Lock()
 					p := n.options.PredecessorListSize
@@ -129,7 +129,7 @@ func (n *Node) successorListFor(successor NodeInfo) []NodeInfo {
 	if n.client == nil {
 		return []NodeInfo{successor.Core()}
 	}
-	resp, err := n.client.SuccessorList(successor.URI)
+	resp, err := n.client.SuccessorList(successor)
 	if err != nil {
 		return []NodeInfo{successor.Core()}
 	}
@@ -141,11 +141,28 @@ func (n *Node) mergeSuccessorListLocked(successor NodeInfo, remote []NodeInfo) [
 	if limit <= 0 {
 		limit = DefaultSuccessorListSize
 	}
+	siblingCap := n.options.SuccessorListSiblingCap
+	if siblingCap <= 0 {
+		siblingCap = DefaultSuccessorListSiblingCap
+	}
+	maxFromAnchor := int(float64(limit) * siblingCap)
+	if maxFromAnchor < 1 {
+		maxFromAnchor = 1
+	}
+
 	seen := map[string]bool{n.self.NodeID: true}
+	anchorCount := map[string]int{}
 	out := make([]NodeInfo, 0, limit)
 	for _, candidate := range append([]NodeInfo{successor.Core()}, remote...) {
 		if candidate.NodeID == "" || seen[candidate.NodeID] {
 			continue
+		}
+		// Sibling diversity: limit entries from the same anchor.
+		if candidate.AnchorID != "" && anchorCount[candidate.AnchorID] >= maxFromAnchor {
+			continue
+		}
+		if candidate.AnchorID != "" {
+			anchorCount[candidate.AnchorID]++
 		}
 		seen[candidate.NodeID] = true
 		out = append(out, candidate.Core())

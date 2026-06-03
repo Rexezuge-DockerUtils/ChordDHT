@@ -4,6 +4,7 @@
 - This is a small Go module (`module chorddht`, Go 1.26) with no external dependencies, Makefile, CI workflow, or useful README content.
 - `cmd/node` is the only executable. It starts an HTTPS Chord DHT node and wires `internal/config`, `internal/chord`, `internal/client`, `internal/httpapi`, and `internal/logging`.
 - `internal/chord` owns ring state, lookup, join/leave, stabilization, successor lists, finger repair, and tracker reporting. `internal/httpapi` is only the JSON HTTP wrapper around `chord.Node` methods.
+- **v4.0 vnode architecture**: `internal/chord/vnode_proof.go` contains `VNodeProof`, `DeriveVNodeID`, `SignVNodeProof`, `VerifyVNodeProof`. `internal/chord/shared_resources.go` contains `NodeInfoCache` and `ProofVerifyCache` (L0 shared resources). `httpapi.NodePool` wraps the anchor + vnodes and routes `/chord/node/{id}/*` paths. `PeerClient` methods that need vnode-specific routing take `NodeInfo` (not just `string`): `FindSuccessor`, `Notify`, `Predecessor`, `SuccessorList`, `Leave`.
 
 ## Commands
 - Run all tests: `go test ./...`
@@ -21,8 +22,11 @@
 
 ## API/Protocol Notes
 - JSON request handlers call `DisallowUnknownFields`, so tests/clients should not send extra fields.
-- Main Chord endpoints are under `/chord/*`; tracker endpoints are external assumptions only (`/tracker/nodes`, `/tracker/nodes/seeds`, heartbeat/delete paths). This repo does not implement a tracker server.
-- `NodeInfo` validation requires a 40-character lowercase hex `node_id` matching `sha1(uri)`; use `NewNodeInfoFromURI` in tests instead of hand-writing IDs.
+- Main Chord endpoints are under `/chord/*` (legacy, routes to anchor) and `/chord/node/{node_id}/*` (v4.0, routes to specific vnode or anchor by ID).
+- `NodeInfo` validation requires a 40-character lowercase hex `node_id` matching `sha1(uri)` for anchors. For vnodes (`anchor_id != ""`), the ID check is skipped — vnode IDs are derived, not URI-based.
+- Tracker endpoints are external assumptions only. This repo does not implement a tracker server.
+- The `PeerClient` interface uses `NodeInfo` (not URI strings) for `FindSuccessor`, `Notify`, `Predecessor`, `SuccessorList`, `Leave` so the client can automatically route to `/chord/node/{id}/` when `target.AnchorID != ""`.
+- Test mocks that implement `PeerClient` must provide all nine methods (including the NodeInfo-based ones).
 
 ## Git Commit Messages
 

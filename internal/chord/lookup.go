@@ -124,7 +124,7 @@ func (n *Node) lookupIterative(id string) (NodeInfo, error) {
 			if n.client == nil {
 				return NodeInfo{}, NewAPIError(http.StatusServiceUnavailable, ErrUpstream, "peer client is not configured")
 			}
-			resp, err = n.client.FindSuccessor(current.URI, req)
+			resp, err = n.client.FindSuccessor(current, req)
 		}
 		if err != nil {
 			return NodeInfo{}, err
@@ -192,7 +192,7 @@ func (n *Node) lookupParallel(id string) (NodeInfo, error) {
 				ID:      id,
 				MaxHops: n.options.MaxHops,
 			}
-			resp, err := n.client.FindSuccessor(peer.URI, req)
+			resp, err := n.client.FindSuccessor(peer, req)
 			if err != nil || !resp.Found || resp.Successor == nil {
 				select {
 				case ch <- result{err: err}:
