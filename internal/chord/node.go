@@ -506,8 +506,15 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 	return nil
 }
 
+// RegisterTracker re-registers this node (and its current VNodeEntries) with the tracker.
+func (n *Node) RegisterTracker() { n.registerTracker() }
+
 func (n *Node) registerTracker() {
 	if n.tracker == nil {
+		return
+	}
+	if n.IsVNode() {
+		// Vnodes are registered through the anchor's tracker registration.
 		return
 	}
 	self := n.Self()
