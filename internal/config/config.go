@@ -13,18 +13,6 @@ import (
 	"chorddht/internal/logging"
 )
 
-func envFloat(key string, fallback float64) float64 {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
 type AuthConfig struct {
 	Enabled                bool
 	CAPublicKeyBase64      string
@@ -114,86 +102,163 @@ type Config struct {
 func Load() (Config, error) {
 	var seeds string
 	cfg := Config{}
-	flag.StringVar(&cfg.NodeURI, "uri", env("NODE_URI", ""), "canonical node https:// URI")
-	flag.StringVar(&cfg.ListenAddr, "listen", env("NODE_LISTEN", ""), "TLS listen address, defaults to URI port")
-	flag.StringVar(&cfg.TLSCertFile, "tls-cert", env("NODE_TLS_CERT_FILE", ""), "TLS certificate file")
-	flag.StringVar(&cfg.TLSKeyFile, "tls-key", env("NODE_TLS_KEY_FILE", ""), "TLS private key file")
-	flag.BoolVar(&cfg.SkipTLSVerify, "skip-tls-verify", envBool("CHORD_SKIP_TLS_VERIFY", false), "skip outbound TLS certificate verification")
-	flag.StringVar(&cfg.LogLevel, "log-level", env("CHORD_LOG_LEVEL", "info"), "log level: debug, info, warn, error")
-	flag.StringVar(&cfg.TrackerURL, "tracker-url", env("TRACKER_URL", ""), "optional tracker https:// URI")
-	flag.StringVar(&seeds, "seeds", env("NODE_MANUAL_SEEDS", ""), "comma-separated manual seed https:// URIs")
-	flag.DurationVar(&cfg.HTTPTimeout, "http-timeout", envDuration("CHORD_HTTP_TIMEOUT_SECONDS", chord.DefaultHTTPTimeout), "HTTP request timeout")
-	flag.DurationVar(&cfg.MaintenanceInterval, "maintenance-interval", envDuration("CHORD_MAINTENANCE_INTERVAL_SECONDS", chord.DefaultMaintenanceInterval), "maintenance interval")
-	flag.IntVar(&cfg.SuccessorListSize, "successor-list-size", envInt("CHORD_SUCCESSOR_LIST_SIZE", chord.DefaultSuccessorListSize), "successor list size")
-	flag.IntVar(&cfg.MaxHops, "max-hops", envInt("CHORD_MAX_HOPS", chord.DefaultMaxHops), "maximum find_successor hops")
-	flag.IntVar(&cfg.SuspiciousThreshold, "suspicious-threshold", envInt("CHORD_SUSPICIOUS_THRESHOLD", chord.DefaultSuspiciousThreshold), "suspicious threshold")
-	flag.IntVar(&cfg.FailedThreshold, "failed-threshold", envInt("CHORD_FAILED_THRESHOLD", chord.DefaultFailedThreshold), "failed threshold")
-	flag.IntVar(&cfg.TrackerSeedCount, "tracker-seed-count", envInt("TRACKER_SEED_COUNT", chord.DefaultTrackerSeedCount), "tracker seed count")
-	flag.BoolVar(&cfg.Auth.Enabled, "auth.enabled", envBool("CHORD_AUTH_ENABLED", false), "enable node identity authentication")
-	flag.StringVar(&cfg.Auth.CAPublicKeyBase64, "auth.ca-public-key-base64", env("CHORD_AUTH_CA_PUBLIC_KEY_BASE64", ""), "CA Ed25519 public key (base64url)")
-	flag.StringVar(&cfg.Auth.NodeCertificateFile, "auth.node-certificate-file", env("CHORD_AUTH_NODE_CERT_FILE", ""), "node certificate JSON file")
-	flag.StringVar(&cfg.Auth.NodePrivateKeyFile, "auth.node-private-key-file", env("CHORD_AUTH_NODE_PRIVATE_KEY_FILE", ""), "node Ed25519 private key file (base64url)")
-	flag.IntVar(&cfg.Auth.TimestampToleranceSecs, "auth.timestamp-tolerance-secs", envInt("CHORD_AUTH_TIMESTAMP_TOLERANCE", 300), "request timestamp tolerance (seconds)")
-	flag.IntVar(&cfg.Auth.NonceCacheTTLSecs, "auth.nonce-cache-ttl-secs", envInt("CHORD_AUTH_NONCE_CACHE_TTL", 600), "nonce cache TTL (seconds)")
-	flag.IntVar(&cfg.Auth.NonceCacheMaxSize, "auth.nonce-cache-max-size", envInt("CHORD_AUTH_NONCE_CACHE_MAX_SIZE", 10000), "nonce cache max entries")
-	flag.IntVar(&cfg.Auth.CertCacheTTLSecs, "auth.cert-cache-ttl-secs", envInt("CHORD_AUTH_CERT_CACHE_TTL", 3600), "cert cache TTL (seconds)")
-	flag.StringVar(&cfg.Auth.CRLFile, "auth.crl-file", env("CHORD_AUTH_CRL_FILE", ""), "CRL JSON file path")
-	flag.BoolVar(&cfg.Auth.CRLRefreshFromTracker, "auth.crl-refresh-from-tracker", envBool("CHORD_AUTH_CRL_REFRESH", true), "auto-refresh CRL from tracker")
-	flag.IntVar(&cfg.Auth.CertExpiryWarnDays, "auth.cert-expiry-warn-days", envInt("CHORD_AUTH_CERT_EXPIRY_WARN", 30), "days before cert expiry to warn")
-	flag.IntVar(&cfg.Auth.BootGracePeriodSecs, "auth.boot-grace-period-secs", envInt("CHORD_AUTH_BOOT_GRACE", 0), "seconds after startup before auth is enforced")
+	flag.StringVar(&cfg.NodeURI, "uri", "", "canonical node https:// URI")
+	flag.StringVar(&cfg.ListenAddr, "listen", "", "TLS listen address, defaults to URI port")
+	flag.StringVar(&cfg.TLSCertFile, "tls-cert", "", "TLS certificate file")
+	flag.StringVar(&cfg.TLSKeyFile, "tls-key", "", "TLS private key file")
+	flag.BoolVar(&cfg.SkipTLSVerify, "skip-tls-verify", false, "skip outbound TLS certificate verification")
+	flag.StringVar(&cfg.LogLevel, "log-level", "info", "log level: debug, info, warn, error")
+	flag.StringVar(&cfg.TrackerURL, "tracker-url", "", "optional tracker https:// URI")
+	flag.StringVar(&seeds, "seeds", "", "comma-separated manual seed https:// URIs")
+	flag.DurationVar(&cfg.HTTPTimeout, "http-timeout", chord.DefaultHTTPTimeout, "HTTP request timeout")
+	flag.DurationVar(&cfg.MaintenanceInterval, "maintenance-interval", chord.DefaultMaintenanceInterval, "maintenance interval")
+	flag.IntVar(&cfg.SuccessorListSize, "successor-list-size", chord.DefaultSuccessorListSize, "successor list size")
+	flag.IntVar(&cfg.MaxHops, "max-hops", chord.DefaultMaxHops, "maximum find_successor hops")
+	flag.IntVar(&cfg.SuspiciousThreshold, "suspicious-threshold", chord.DefaultSuspiciousThreshold, "suspicious threshold")
+	flag.IntVar(&cfg.FailedThreshold, "failed-threshold", chord.DefaultFailedThreshold, "failed threshold")
+	flag.IntVar(&cfg.TrackerSeedCount, "tracker-seed-count", chord.DefaultTrackerSeedCount, "tracker seed count")
+	flag.BoolVar(&cfg.Auth.Enabled, "auth.enabled", false, "enable node identity authentication")
+	flag.StringVar(&cfg.Auth.CAPublicKeyBase64, "auth.ca-public-key-base64", "", "CA Ed25519 public key (base64url)")
+	flag.StringVar(&cfg.Auth.NodeCertificateFile, "auth.node-certificate-file", "", "node certificate JSON file")
+	flag.StringVar(&cfg.Auth.NodePrivateKeyFile, "auth.node-private-key-file", "", "node Ed25519 private key file (base64url)")
+	flag.IntVar(&cfg.Auth.TimestampToleranceSecs, "auth.timestamp-tolerance-secs", 300, "request timestamp tolerance (seconds)")
+	flag.IntVar(&cfg.Auth.NonceCacheTTLSecs, "auth.nonce-cache-ttl-secs", 600, "nonce cache TTL (seconds)")
+	flag.IntVar(&cfg.Auth.NonceCacheMaxSize, "auth.nonce-cache-max-size", 10000, "nonce cache max entries")
+	flag.IntVar(&cfg.Auth.CertCacheTTLSecs, "auth.cert-cache-ttl-secs", 3600, "cert cache TTL (seconds)")
+	flag.StringVar(&cfg.Auth.CRLFile, "auth.crl-file", "", "CRL JSON file path")
+	flag.BoolVar(&cfg.Auth.CRLRefreshFromTracker, "auth.crl-refresh-from-tracker", true, "auto-refresh CRL from tracker")
+	flag.IntVar(&cfg.Auth.CertExpiryWarnDays, "auth.cert-expiry-warn-days", 30, "days before cert expiry to warn")
+	flag.IntVar(&cfg.Auth.BootGracePeriodSecs, "auth.boot-grace-period-secs", 0, "seconds after startup before auth is enforced")
 
 	// v4.0 flags
-	flag.IntVar(&cfg.VNodeCount, "vnode-count", envInt("CHORD_VNODE_COUNT", 0), "number of virtual nodes to spawn (0 = pure anchor mode)")
-	flag.IntVar(&cfg.MaxVNodes, "max-vnodes", envInt("CHORD_MAX_VNODES", 8), "maximum vnodes allowed per anchor")
-	flag.DurationVar(&cfg.VNodeProofTTL, "vnodeproof-ttl", envDuration("CHORD_VNODEPROOF_TTL", 86400*time.Second), "VNodeProof validity period")
-	flag.DurationVar(&cfg.VNodeProofRenewBefore, "vnodeproof-renew-before", envDuration("CHORD_VNODEPROOF_RENEW_BEFORE", 3600*time.Second), "seconds before expiry to renew VNodeProof")
-	flag.DurationVar(&cfg.ClockSkewTolerance, "clock-skew-tolerance", envDuration("CHORD_CLOCK_SKEW_TOLERANCE", 30*time.Second), "VNodeProof expiry clock skew tolerance")
-	flag.IntVar(&cfg.VNodeGoroutineLimit, "vnode-goroutine-limit", envInt("CHORD_VNODE_GOROUTINE_LIMIT", 32), "max concurrent goroutines per vnode")
-	flag.DurationVar(&cfg.VNodeMaintenanceJitter, "vnode-maintenance-jitter", envDuration("CHORD_VNODE_MAINTENANCE_JITTER", 5*time.Second), "vnode maintenance startup jitter range")
-	flag.IntVar(&cfg.SiblingRouteMaxHops, "sibling-route-max-hops", envInt("CHORD_SIBLING_ROUTE_MAX_HOPS", 2), "max consecutive same-anchor vnode hops in routing")
-	flag.Float64Var(&cfg.SuccessorListSiblingCap, "successor-list-sibling-cap", envFloat("CHORD_SUCCESSOR_LIST_SIBLING_CAP", 0.5), "max fraction of successor list entries from same anchor")
-	flag.BoolVar(&cfg.VNodeBootstrapPreferExt, "vnode-bootstrap-prefer-external", envBool("CHORD_VNODE_BOOTSTRAP_PREFER_EXT", true), "prefer non-sibling bootstrap nodes when vnode joins")
-	flag.IntVar(&cfg.SharedNodeInfoCacheSize, "shared-nodeinfo-cache-size", envInt("CHORD_SHARED_NODEINFO_CACHE_SIZE", 2048), "L0 NodeInfo cache capacity")
-	flag.DurationVar(&cfg.SharedNodeInfoCacheTTL, "shared-nodeinfo-cache-ttl", envDuration("CHORD_SHARED_NODEINFO_CACHE_TTL", 30*time.Second), "L0 NodeInfo cache TTL")
-	flag.DurationVar(&cfg.SharedRTTCacheTTL, "shared-rtt-cache-ttl", envDuration("CHORD_SHARED_RTT_CACHE_TTL", 60*time.Second), "L0 RTT cache TTL")
-	flag.IntVar(&cfg.SharedRouteCacheSize, "shared-route-cache-size", envInt("CHORD_SHARED_ROUTE_CACHE_SIZE", 1024), "L0 routing LRU cache capacity")
-	flag.DurationVar(&cfg.SharedRouteCacheTTL, "shared-route-cache-ttl", envDuration("CHORD_SHARED_ROUTE_CACHE_TTL", 10*time.Second), "L0 routing cache TTL")
-	flag.IntVar(&cfg.SharedProofVerifyCacheSize, "shared-proof-verify-cache-size", envInt("CHORD_SHARED_PROOF_VERIFY_CACHE_SIZE", 256), "L0 VNodeProof verify cache capacity")
-	flag.DurationVar(&cfg.TransferTimeout, "transfer-timeout", envDuration("CHORD_TRANSFER_TIMEOUT", 30*time.Second), "key transfer ACK timeout")
+	flag.IntVar(&cfg.VNodeCount, "vnode-count", 0, "number of virtual nodes to spawn (0 = pure anchor mode)")
+	flag.IntVar(&cfg.MaxVNodes, "max-vnodes", 8, "maximum vnodes allowed per anchor")
+	flag.DurationVar(&cfg.VNodeProofTTL, "vnodeproof-ttl", 86400*time.Second, "VNodeProof validity period")
+	flag.DurationVar(&cfg.VNodeProofRenewBefore, "vnodeproof-renew-before", 3600*time.Second, "seconds before expiry to renew VNodeProof")
+	flag.DurationVar(&cfg.ClockSkewTolerance, "clock-skew-tolerance", 30*time.Second, "VNodeProof expiry clock skew tolerance")
+	flag.IntVar(&cfg.VNodeGoroutineLimit, "vnode-goroutine-limit", 32, "max concurrent goroutines per vnode")
+	flag.DurationVar(&cfg.VNodeMaintenanceJitter, "vnode-maintenance-jitter", 5*time.Second, "vnode maintenance startup jitter range")
+	flag.IntVar(&cfg.SiblingRouteMaxHops, "sibling-route-max-hops", 2, "max consecutive same-anchor vnode hops in routing")
+	flag.Float64Var(&cfg.SuccessorListSiblingCap, "successor-list-sibling-cap", 0.5, "max fraction of successor list entries from same anchor")
+	flag.BoolVar(&cfg.VNodeBootstrapPreferExt, "vnode-bootstrap-prefer-external", true, "prefer non-sibling bootstrap nodes when vnode joins")
+	flag.IntVar(&cfg.SharedNodeInfoCacheSize, "shared-nodeinfo-cache-size", 2048, "L0 NodeInfo cache capacity")
+	flag.DurationVar(&cfg.SharedNodeInfoCacheTTL, "shared-nodeinfo-cache-ttl", 30*time.Second, "L0 NodeInfo cache TTL")
+	flag.DurationVar(&cfg.SharedRTTCacheTTL, "shared-rtt-cache-ttl", 60*time.Second, "L0 RTT cache TTL")
+	flag.IntVar(&cfg.SharedRouteCacheSize, "shared-route-cache-size", 1024, "L0 routing LRU cache capacity")
+	flag.DurationVar(&cfg.SharedRouteCacheTTL, "shared-route-cache-ttl", 10*time.Second, "L0 routing cache TTL")
+	flag.IntVar(&cfg.SharedProofVerifyCacheSize, "shared-proof-verify-cache-size", 256, "L0 VNodeProof verify cache capacity")
+	flag.DurationVar(&cfg.TransferTimeout, "transfer-timeout", 30*time.Second, "key transfer ACK timeout")
 
 	// v3.0 flags
-	flag.StringVar(&cfg.NodeRegion, "node-region", env("CHORD_NODE_REGION", ""), "node region label (auto-detected from tracker when empty)")
-	flag.IntVar(&cfg.PredecessorListSize, "predecessor-list-size", envInt("CHORD_PREDECESSOR_LIST_SIZE", chord.DefaultPredecessorListSize), "predecessor chain backup length")
-	flag.IntVar(&cfg.FixFingersBatchSizeActive, "fix-fingers-batch-active", envInt("CHORD_FIX_FINGERS_BATCH_ACTIVE", chord.DefaultFixFingersBatchSizeActive), "fingers repaired per cycle in active mode")
-	flag.IntVar(&cfg.FixFingersBatchSizeQuiet, "fix-fingers-batch-quiet", envInt("CHORD_FIX_FINGERS_BATCH_QUIET", chord.DefaultFixFingersBatchSizeQuiet), "fingers repaired per cycle in quiet mode")
-	flag.BoolVar(&cfg.RoutingCacheEnabled, "routing-cache-enabled", envBool("CHORD_ROUTING_CACHE_ENABLED", true), "enable LRU routing result cache")
-	flag.IntVar(&cfg.RoutingCacheSize, "routing-cache-size", envInt("CHORD_ROUTING_CACHE_SIZE", chord.DefaultRoutingCacheSize), "routing cache max entries")
-	flag.DurationVar(&cfg.RoutingCacheTTL, "routing-cache-ttl", envDuration("CHORD_ROUTING_CACHE_TTL_SECONDS", chord.DefaultRoutingCacheTTL), "routing cache TTL")
-	flag.Float64Var(&cfg.LatencyWeightID, "latency-weight-id", envFloat("CHORD_LATENCY_WEIGHT_ID", 0.6), "routing score weight for ID proximity")
-	flag.Float64Var(&cfg.LatencyWeightRTT, "latency-weight-rtt", envFloat("CHORD_LATENCY_WEIGHT_RTT", 0.3), "routing score weight for RTT")
-	flag.Float64Var(&cfg.LatencyWeightRegion, "latency-weight-region", envFloat("CHORD_LATENCY_WEIGHT_REGION", 0.1), "routing score weight for region affinity")
-	flag.BoolVar(&cfg.ParallelLookupEnabled, "parallel-lookup-enabled", envBool("CHORD_PARALLEL_LOOKUP_ENABLED", false), "enable parallel find_successor probing")
-	flag.IntVar(&cfg.ParallelLookupCandidates, "parallel-lookup-candidates", envInt("CHORD_PARALLEL_LOOKUP_CANDIDATES", 3), "parallel lookup candidate count")
-	flag.DurationVar(&cfg.TimeoutPingSameRegion, "timeout-ping-same", envDuration("CHORD_TIMEOUT_PING_SAME", chord.DefaultTimeoutPingSameRegion), "/ping timeout for same-region peers")
-	flag.DurationVar(&cfg.TimeoutPingCrossRegion, "timeout-ping-cross", envDuration("CHORD_TIMEOUT_PING_CROSS", chord.DefaultTimeoutPingCrossRegion), "/ping timeout for cross-region peers")
-	flag.DurationVar(&cfg.TimeoutFindSuccessorSame, "timeout-find-successor-same", envDuration("CHORD_TIMEOUT_FIND_SUCCESSOR_SAME", chord.DefaultTimeoutFindSuccessorSame), "/find_successor timeout for same-region peers")
-	flag.DurationVar(&cfg.TimeoutFindSuccessorCross, "timeout-find-successor-cross", envDuration("CHORD_TIMEOUT_FIND_SUCCESSOR_CROSS", chord.DefaultTimeoutFindSuccessorCross), "/find_successor timeout for cross-region peers")
-	flag.DurationVar(&cfg.TimeoutFixFingersSame, "timeout-fix-fingers-same", envDuration("CHORD_TIMEOUT_FIX_FINGERS_SAME", chord.DefaultTimeoutFixFingersSame), "fix_fingers /find_successor timeout for same-region peers")
-	flag.DurationVar(&cfg.TimeoutFixFingersCross, "timeout-fix-fingers-cross", envDuration("CHORD_TIMEOUT_FIX_FINGERS_CROSS", chord.DefaultTimeoutFixFingersCross), "fix_fingers /find_successor timeout for cross-region peers")
-	flag.DurationVar(&cfg.LatencyProbeIntervalActive, "latency-probe-interval-active", envDuration("CHORD_LATENCY_PROBE_ACTIVE", chord.DefaultLatencyProbeActiveInterval), "RTT probe interval in active mode")
-	flag.DurationVar(&cfg.LatencyProbeIntervalQuiet, "latency-probe-interval-quiet", envDuration("CHORD_LATENCY_PROBE_QUIET", chord.DefaultLatencyProbeQuietInterval), "RTT probe interval in quiet mode")
-	flag.Float64Var(&cfg.RTTEWMAAlpha, "rtt-ewma-alpha", envFloat("CHORD_RTT_EWMA_ALPHA", chord.DefaultRTTEWMAAlpha), "EWMA smoothing factor for RTT samples")
-	flag.DurationVar(&cfg.RTTSampleExpiry, "rtt-sample-expiry", envDuration("CHORD_RTT_SAMPLE_EXPIRY", chord.DefaultRTTSampleExpiry), "RTT sample expiry duration")
-	flag.BoolVar(&cfg.PiggybackEnabled, "piggyback-enabled", envBool("CHORD_PIGGYBACK_ENABLED", true), "attach piggyback topology hints to responses")
-	flag.IntVar(&cfg.StabilizeDebounceThreshold, "stabilize-debounce-threshold", envInt("CHORD_STABILIZE_DEBOUNCE", chord.DefaultStabilizeDebounceThreshold), "consecutive stabilize changes before debounce")
-	flag.DurationVar(&cfg.TopologyChangeWindow, "topology-change-window", envDuration("CHORD_TOPOLOGY_CHANGE_WINDOW", chord.DefaultTopologyChangeWindow), "quiet period before switching to quiet maintenance mode")
-	flag.DurationVar(&cfg.StabilizeActiveInterval, "stabilize-active-interval", envDuration("CHORD_STABILIZE_ACTIVE_INTERVAL", chord.DefaultStabilizeActiveInterval), "stabilize interval in active mode")
-	flag.DurationVar(&cfg.StabilizeQuietInterval, "stabilize-quiet-interval", envDuration("CHORD_STABILIZE_QUIET_INTERVAL", chord.DefaultStabilizeQuietInterval), "stabilize interval in quiet mode")
-	flag.DurationVar(&cfg.FixFingersActiveInterval, "fix-fingers-active-interval", envDuration("CHORD_FIX_FINGERS_ACTIVE_INTERVAL", chord.DefaultFixFingersActiveInterval), "fix_fingers interval in active mode")
-	flag.DurationVar(&cfg.FixFingersQuietInterval, "fix-fingers-quiet-interval", envDuration("CHORD_FIX_FINGERS_QUIET_INTERVAL", chord.DefaultFixFingersQuietInterval), "fix_fingers interval in quiet mode")
-	flag.DurationVar(&cfg.CheckPredecessorActiveInterval, "check-predecessor-active-interval", envDuration("CHORD_CHECK_PREDECESSOR_ACTIVE_INTERVAL", chord.DefaultCheckPredecessorActiveInterval), "check_predecessor interval in active mode")
-	flag.DurationVar(&cfg.CheckPredecessorQuietInterval, "check-predecessor-quiet-interval", envDuration("CHORD_CHECK_PREDECESSOR_QUIET_INTERVAL", chord.DefaultCheckPredecessorQuietInterval), "check_predecessor interval in quiet mode")
+	flag.StringVar(&cfg.NodeRegion, "node-region", "", "node region label (auto-detected from tracker when empty)")
+	flag.IntVar(&cfg.PredecessorListSize, "predecessor-list-size", chord.DefaultPredecessorListSize, "predecessor chain backup length")
+	flag.IntVar(&cfg.FixFingersBatchSizeActive, "fix-fingers-batch-active", chord.DefaultFixFingersBatchSizeActive, "fingers repaired per cycle in active mode")
+	flag.IntVar(&cfg.FixFingersBatchSizeQuiet, "fix-fingers-batch-quiet", chord.DefaultFixFingersBatchSizeQuiet, "fingers repaired per cycle in quiet mode")
+	flag.BoolVar(&cfg.RoutingCacheEnabled, "routing-cache-enabled", true, "enable LRU routing result cache")
+	flag.IntVar(&cfg.RoutingCacheSize, "routing-cache-size", chord.DefaultRoutingCacheSize, "routing cache max entries")
+	flag.DurationVar(&cfg.RoutingCacheTTL, "routing-cache-ttl", chord.DefaultRoutingCacheTTL, "routing cache TTL")
+	flag.Float64Var(&cfg.LatencyWeightID, "latency-weight-id", 0.6, "routing score weight for ID proximity")
+	flag.Float64Var(&cfg.LatencyWeightRTT, "latency-weight-rtt", 0.3, "routing score weight for RTT")
+	flag.Float64Var(&cfg.LatencyWeightRegion, "latency-weight-region", 0.1, "routing score weight for region affinity")
+	flag.BoolVar(&cfg.ParallelLookupEnabled, "parallel-lookup-enabled", false, "enable parallel find_successor probing")
+	flag.IntVar(&cfg.ParallelLookupCandidates, "parallel-lookup-candidates", 3, "parallel lookup candidate count")
+	flag.DurationVar(&cfg.TimeoutPingSameRegion, "timeout-ping-same", chord.DefaultTimeoutPingSameRegion, "/ping timeout for same-region peers")
+	flag.DurationVar(&cfg.TimeoutPingCrossRegion, "timeout-ping-cross", chord.DefaultTimeoutPingCrossRegion, "/ping timeout for cross-region peers")
+	flag.DurationVar(&cfg.TimeoutFindSuccessorSame, "timeout-find-successor-same", chord.DefaultTimeoutFindSuccessorSame, "/find_successor timeout for same-region peers")
+	flag.DurationVar(&cfg.TimeoutFindSuccessorCross, "timeout-find-successor-cross", chord.DefaultTimeoutFindSuccessorCross, "/find_successor timeout for cross-region peers")
+	flag.DurationVar(&cfg.TimeoutFixFingersSame, "timeout-fix-fingers-same", chord.DefaultTimeoutFixFingersSame, "fix_fingers /find_successor timeout for same-region peers")
+	flag.DurationVar(&cfg.TimeoutFixFingersCross, "timeout-fix-fingers-cross", chord.DefaultTimeoutFixFingersCross, "fix_fingers /find_successor timeout for cross-region peers")
+	flag.DurationVar(&cfg.LatencyProbeIntervalActive, "latency-probe-interval-active", chord.DefaultLatencyProbeActiveInterval, "RTT probe interval in active mode")
+	flag.DurationVar(&cfg.LatencyProbeIntervalQuiet, "latency-probe-interval-quiet", chord.DefaultLatencyProbeQuietInterval, "RTT probe interval in quiet mode")
+	flag.Float64Var(&cfg.RTTEWMAAlpha, "rtt-ewma-alpha", chord.DefaultRTTEWMAAlpha, "EWMA smoothing factor for RTT samples")
+	flag.DurationVar(&cfg.RTTSampleExpiry, "rtt-sample-expiry", chord.DefaultRTTSampleExpiry, "RTT sample expiry duration")
+	flag.BoolVar(&cfg.PiggybackEnabled, "piggyback-enabled", true, "attach piggyback topology hints to responses")
+	flag.IntVar(&cfg.StabilizeDebounceThreshold, "stabilize-debounce-threshold", chord.DefaultStabilizeDebounceThreshold, "consecutive stabilize changes before debounce")
+	flag.DurationVar(&cfg.TopologyChangeWindow, "topology-change-window", chord.DefaultTopologyChangeWindow, "quiet period before switching to quiet maintenance mode")
+	flag.DurationVar(&cfg.StabilizeActiveInterval, "stabilize-active-interval", chord.DefaultStabilizeActiveInterval, "stabilize interval in active mode")
+	flag.DurationVar(&cfg.StabilizeQuietInterval, "stabilize-quiet-interval", chord.DefaultStabilizeQuietInterval, "stabilize interval in quiet mode")
+	flag.DurationVar(&cfg.FixFingersActiveInterval, "fix-fingers-active-interval", chord.DefaultFixFingersActiveInterval, "fix_fingers interval in active mode")
+	flag.DurationVar(&cfg.FixFingersQuietInterval, "fix-fingers-quiet-interval", chord.DefaultFixFingersQuietInterval, "fix_fingers interval in quiet mode")
+	flag.DurationVar(&cfg.CheckPredecessorActiveInterval, "check-predecessor-active-interval", chord.DefaultCheckPredecessorActiveInterval, "check_predecessor interval in active mode")
+	flag.DurationVar(&cfg.CheckPredecessorQuietInterval, "check-predecessor-quiet-interval", chord.DefaultCheckPredecessorQuietInterval, "check_predecessor interval in quiet mode")
 	flag.Parse()
+
+	// Env vars take priority over CLI flags.
+	applyEnv("NODE_URI", &cfg.NodeURI)
+	applyEnv("NODE_LISTEN", &cfg.ListenAddr)
+	applyEnv("NODE_TLS_CERT_FILE", &cfg.TLSCertFile)
+	applyEnv("NODE_TLS_KEY_FILE", &cfg.TLSKeyFile)
+	applyEnvBool("CHORD_SKIP_TLS_VERIFY", &cfg.SkipTLSVerify)
+	applyEnv("CHORD_LOG_LEVEL", &cfg.LogLevel)
+	applyEnv("TRACKER_URL", &cfg.TrackerURL)
+	applyEnv("NODE_MANUAL_SEEDS", &seeds)
+	applyEnvDuration("CHORD_HTTP_TIMEOUT_SECONDS", &cfg.HTTPTimeout)
+	applyEnvDuration("CHORD_MAINTENANCE_INTERVAL_SECONDS", &cfg.MaintenanceInterval)
+	applyEnvInt("CHORD_SUCCESSOR_LIST_SIZE", &cfg.SuccessorListSize)
+	applyEnvInt("CHORD_MAX_HOPS", &cfg.MaxHops)
+	applyEnvInt("CHORD_SUSPICIOUS_THRESHOLD", &cfg.SuspiciousThreshold)
+	applyEnvInt("CHORD_FAILED_THRESHOLD", &cfg.FailedThreshold)
+	applyEnvInt("TRACKER_SEED_COUNT", &cfg.TrackerSeedCount)
+	applyEnvBool("CHORD_AUTH_ENABLED", &cfg.Auth.Enabled)
+	applyEnv("CHORD_AUTH_CA_PUBLIC_KEY_BASE64", &cfg.Auth.CAPublicKeyBase64)
+	applyEnv("CHORD_AUTH_NODE_CERT_FILE", &cfg.Auth.NodeCertificateFile)
+	applyEnv("CHORD_AUTH_NODE_PRIVATE_KEY_FILE", &cfg.Auth.NodePrivateKeyFile)
+	applyEnvInt("CHORD_AUTH_TIMESTAMP_TOLERANCE", &cfg.Auth.TimestampToleranceSecs)
+	applyEnvInt("CHORD_AUTH_NONCE_CACHE_TTL", &cfg.Auth.NonceCacheTTLSecs)
+	applyEnvInt("CHORD_AUTH_NONCE_CACHE_MAX_SIZE", &cfg.Auth.NonceCacheMaxSize)
+	applyEnvInt("CHORD_AUTH_CERT_CACHE_TTL", &cfg.Auth.CertCacheTTLSecs)
+	applyEnv("CHORD_AUTH_CRL_FILE", &cfg.Auth.CRLFile)
+	applyEnvBool("CHORD_AUTH_CRL_REFRESH", &cfg.Auth.CRLRefreshFromTracker)
+	applyEnvInt("CHORD_AUTH_CERT_EXPIRY_WARN", &cfg.Auth.CertExpiryWarnDays)
+	applyEnvInt("CHORD_AUTH_BOOT_GRACE", &cfg.Auth.BootGracePeriodSecs)
+	applyEnvInt("CHORD_VNODE_COUNT", &cfg.VNodeCount)
+	applyEnvInt("CHORD_MAX_VNODES", &cfg.MaxVNodes)
+	applyEnvDuration("CHORD_VNODEPROOF_TTL", &cfg.VNodeProofTTL)
+	applyEnvDuration("CHORD_VNODEPROOF_RENEW_BEFORE", &cfg.VNodeProofRenewBefore)
+	applyEnvDuration("CHORD_CLOCK_SKEW_TOLERANCE", &cfg.ClockSkewTolerance)
+	applyEnvInt("CHORD_VNODE_GOROUTINE_LIMIT", &cfg.VNodeGoroutineLimit)
+	applyEnvDuration("CHORD_VNODE_MAINTENANCE_JITTER", &cfg.VNodeMaintenanceJitter)
+	applyEnvInt("CHORD_SIBLING_ROUTE_MAX_HOPS", &cfg.SiblingRouteMaxHops)
+	applyEnvFloat("CHORD_SUCCESSOR_LIST_SIBLING_CAP", &cfg.SuccessorListSiblingCap)
+	applyEnvBool("CHORD_VNODE_BOOTSTRAP_PREFER_EXT", &cfg.VNodeBootstrapPreferExt)
+	applyEnvInt("CHORD_SHARED_NODEINFO_CACHE_SIZE", &cfg.SharedNodeInfoCacheSize)
+	applyEnvDuration("CHORD_SHARED_NODEINFO_CACHE_TTL", &cfg.SharedNodeInfoCacheTTL)
+	applyEnvDuration("CHORD_SHARED_RTT_CACHE_TTL", &cfg.SharedRTTCacheTTL)
+	applyEnvInt("CHORD_SHARED_ROUTE_CACHE_SIZE", &cfg.SharedRouteCacheSize)
+	applyEnvDuration("CHORD_SHARED_ROUTE_CACHE_TTL", &cfg.SharedRouteCacheTTL)
+	applyEnvInt("CHORD_SHARED_PROOF_VERIFY_CACHE_SIZE", &cfg.SharedProofVerifyCacheSize)
+	applyEnvDuration("CHORD_TRANSFER_TIMEOUT", &cfg.TransferTimeout)
+	applyEnv("CHORD_NODE_REGION", &cfg.NodeRegion)
+	applyEnvInt("CHORD_PREDECESSOR_LIST_SIZE", &cfg.PredecessorListSize)
+	applyEnvInt("CHORD_FIX_FINGERS_BATCH_ACTIVE", &cfg.FixFingersBatchSizeActive)
+	applyEnvInt("CHORD_FIX_FINGERS_BATCH_QUIET", &cfg.FixFingersBatchSizeQuiet)
+	applyEnvBool("CHORD_ROUTING_CACHE_ENABLED", &cfg.RoutingCacheEnabled)
+	applyEnvInt("CHORD_ROUTING_CACHE_SIZE", &cfg.RoutingCacheSize)
+	applyEnvDuration("CHORD_ROUTING_CACHE_TTL_SECONDS", &cfg.RoutingCacheTTL)
+	applyEnvFloat("CHORD_LATENCY_WEIGHT_ID", &cfg.LatencyWeightID)
+	applyEnvFloat("CHORD_LATENCY_WEIGHT_RTT", &cfg.LatencyWeightRTT)
+	applyEnvFloat("CHORD_LATENCY_WEIGHT_REGION", &cfg.LatencyWeightRegion)
+	applyEnvBool("CHORD_PARALLEL_LOOKUP_ENABLED", &cfg.ParallelLookupEnabled)
+	applyEnvInt("CHORD_PARALLEL_LOOKUP_CANDIDATES", &cfg.ParallelLookupCandidates)
+	applyEnvDuration("CHORD_TIMEOUT_PING_SAME", &cfg.TimeoutPingSameRegion)
+	applyEnvDuration("CHORD_TIMEOUT_PING_CROSS", &cfg.TimeoutPingCrossRegion)
+	applyEnvDuration("CHORD_TIMEOUT_FIND_SUCCESSOR_SAME", &cfg.TimeoutFindSuccessorSame)
+	applyEnvDuration("CHORD_TIMEOUT_FIND_SUCCESSOR_CROSS", &cfg.TimeoutFindSuccessorCross)
+	applyEnvDuration("CHORD_TIMEOUT_FIX_FINGERS_SAME", &cfg.TimeoutFixFingersSame)
+	applyEnvDuration("CHORD_TIMEOUT_FIX_FINGERS_CROSS", &cfg.TimeoutFixFingersCross)
+	applyEnvDuration("CHORD_LATENCY_PROBE_ACTIVE", &cfg.LatencyProbeIntervalActive)
+	applyEnvDuration("CHORD_LATENCY_PROBE_QUIET", &cfg.LatencyProbeIntervalQuiet)
+	applyEnvFloat("CHORD_RTT_EWMA_ALPHA", &cfg.RTTEWMAAlpha)
+	applyEnvDuration("CHORD_RTT_SAMPLE_EXPIRY", &cfg.RTTSampleExpiry)
+	applyEnvBool("CHORD_PIGGYBACK_ENABLED", &cfg.PiggybackEnabled)
+	applyEnvInt("CHORD_STABILIZE_DEBOUNCE", &cfg.StabilizeDebounceThreshold)
+	applyEnvDuration("CHORD_TOPOLOGY_CHANGE_WINDOW", &cfg.TopologyChangeWindow)
+	applyEnvDuration("CHORD_STABILIZE_ACTIVE_INTERVAL", &cfg.StabilizeActiveInterval)
+	applyEnvDuration("CHORD_STABILIZE_QUIET_INTERVAL", &cfg.StabilizeQuietInterval)
+	applyEnvDuration("CHORD_FIX_FINGERS_ACTIVE_INTERVAL", &cfg.FixFingersActiveInterval)
+	applyEnvDuration("CHORD_FIX_FINGERS_QUIET_INTERVAL", &cfg.FixFingersQuietInterval)
+	applyEnvDuration("CHORD_CHECK_PREDECESSOR_ACTIVE_INTERVAL", &cfg.CheckPredecessorActiveInterval)
+	applyEnvDuration("CHORD_CHECK_PREDECESSOR_QUIET_INTERVAL", &cfg.CheckPredecessorQuietInterval)
 
 	normalized, err := chord.NormalizeURI(cfg.NodeURI)
 	if err != nil {
@@ -303,47 +368,50 @@ func (c Config) ChordOptions() chord.Options {
 	}
 }
 
-func env(key, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		return value
+func applyEnv(key string, target *string) {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		*target = v
 	}
-	return fallback
 }
 
-func envInt(key string, fallback int) int {
+func applyEnvInt(key string, target *int) {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
-		return fallback
+		return
 	}
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		return fallback
+	if parsed, err := strconv.Atoi(value); err == nil {
+		*target = parsed
 	}
-	return parsed
 }
 
-func envBool(key string, fallback bool) bool {
+func applyEnvBool(key string, target *bool) {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
-		return fallback
+		return
 	}
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return fallback
+	if parsed, err := strconv.ParseBool(value); err == nil {
+		*target = parsed
 	}
-	return parsed
 }
 
-func envDuration(key string, fallback time.Duration) time.Duration {
+func applyEnvFloat(key string, target *float64) {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
-		return fallback
+		return
 	}
-	seconds, err := strconv.Atoi(value)
-	if err != nil {
-		return fallback
+	if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+		*target = parsed
 	}
-	return time.Duration(seconds) * time.Second
+}
+
+func applyEnvDuration(key string, target *time.Duration) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		*target = time.Duration(seconds) * time.Second
+	}
 }
 
 func listenFromURI(uri string) string {
