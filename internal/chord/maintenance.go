@@ -41,6 +41,7 @@ func (n *Node) RunMaintenance(ctx context.Context) {
 func (n *Node) MaintenanceCycle() {
 	status := n.Self().Status
 	if status == StatusActive {
+		n.retryBootstrapIfSingleton()
 		n.CheckPredecessor()
 		n.Stabilize()
 		n.fixFingersBatch()
@@ -94,6 +95,7 @@ func (n *Node) runStabilizeLoop(ctx context.Context) {
 		status := n.status
 		n.mu.RUnlock()
 		if status == StatusActive {
+			n.retryBootstrapIfSingleton()
 			n.Stabilize()
 			n.HealthCheckRing()
 			n.ReportToTracker()

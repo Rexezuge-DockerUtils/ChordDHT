@@ -28,63 +28,63 @@ type Options struct {
 	OnCRLRefresh func(crlJSON []byte)
 
 	// v4.0 vnode options
-	VNodeIndex              int           // 0 = anchor; 1+ = vnode
-	AnchorID                string        // empty for anchors
-	VNodeProofPtr           *VNodeProof   // current VNodeProof; nil for anchors
-	MaxVNodes               int
-	VNodeProofTTL           time.Duration
-	VNodeProofRenewBefore   time.Duration
-	ClockSkewTolerance      time.Duration
-	VNodeGoroutineLimit     int
-	VNodeMaintenanceJitter  time.Duration
-	SiblingRouteMaxHops     int
-	SuccessorListSiblingCap float64
-	VNodeBootstrapPreferExt bool
-	SharedNodeInfoCacheSize  int
-	SharedNodeInfoCacheTTL   time.Duration
-	SharedRTTCacheTTL        time.Duration
-	SharedRouteCacheSize     int
-	SharedRouteCacheTTL      time.Duration
+	VNodeIndex                 int         // 0 = anchor; 1+ = vnode
+	AnchorID                   string      // empty for anchors
+	VNodeProofPtr              *VNodeProof // current VNodeProof; nil for anchors
+	MaxVNodes                  int
+	VNodeProofTTL              time.Duration
+	VNodeProofRenewBefore      time.Duration
+	ClockSkewTolerance         time.Duration
+	VNodeGoroutineLimit        int
+	VNodeMaintenanceJitter     time.Duration
+	SiblingRouteMaxHops        int
+	SuccessorListSiblingCap    float64
+	VNodeBootstrapPreferExt    bool
+	SharedNodeInfoCacheSize    int
+	SharedNodeInfoCacheTTL     time.Duration
+	SharedRTTCacheTTL          time.Duration
+	SharedRouteCacheSize       int
+	SharedRouteCacheTTL        time.Duration
 	SharedProofVerifyCacheSize int
-	TransferTimeout          time.Duration
+	TransferTimeout            time.Duration
 	// Shared L0 resources; set on vnodes to share the anchor's caches.
-	SharedRTTCache    *RTTCache
+	SharedRTTCache     *RTTCache
 	SharedRoutingCache *RoutingCache
 	// VNodeEntries allows the anchor to include its vnodes in tracker registration.
 	VNodeEntries []VNodeEntry
 
 	// v3.0 options
-	Region                          string
-	PredecessorListSize             int
-	FixFingersBatchSizeActive       int
-	FixFingersBatchSizeQuiet        int
-	RoutingCacheEnabled             bool
-	RoutingCacheSize                int
-	RoutingCacheTTL                 time.Duration
-	LatencyWeightID                 float64
-	LatencyWeightRTT                float64
-	LatencyWeightRegion             float64
-	ParallelLookupEnabled           bool
-	ParallelLookupCandidates        int
-	TimeoutPingSameRegion           time.Duration
-	TimeoutPingCrossRegion          time.Duration
-	TimeoutFindSuccessorSame        time.Duration
-	TimeoutFindSuccessorCross       time.Duration
-	TimeoutFixFingersSame           time.Duration
-	TimeoutFixFingersCross          time.Duration
-	LatencyProbeIntervalActive      time.Duration
-	LatencyProbeIntervalQuiet       time.Duration
-	RTTEWMAAlpha                    float64
-	RTTSampleExpiry                 time.Duration
-	PiggybackEnabled                bool
-	StabilizeDebounceThreshold      int
-	TopologyChangeWindow            time.Duration
-	StabilizeActiveInterval         time.Duration
-	StabilizeQuietInterval          time.Duration
-	FixFingersActiveInterval        time.Duration
-	FixFingersQuietInterval         time.Duration
-	CheckPredecessorActiveInterval  time.Duration
-	CheckPredecessorQuietInterval   time.Duration
+	Region                         string
+	PredecessorListSize            int
+	FixFingersBatchSizeActive      int
+	FixFingersBatchSizeQuiet       int
+	RoutingCacheEnabled            bool
+	RoutingCacheSize               int
+	RoutingCacheTTL                time.Duration
+	LatencyWeightID                float64
+	LatencyWeightRTT               float64
+	LatencyWeightRegion            float64
+	ParallelLookupEnabled          bool
+	ParallelLookupCandidates       int
+	TimeoutPingSameRegion          time.Duration
+	TimeoutPingCrossRegion         time.Duration
+	TimeoutFindSuccessorSame       time.Duration
+	TimeoutFindSuccessorCross      time.Duration
+	TimeoutFixFingersSame          time.Duration
+	TimeoutFixFingersCross         time.Duration
+	LatencyProbeIntervalActive     time.Duration
+	LatencyProbeIntervalQuiet      time.Duration
+	RTTEWMAAlpha                   float64
+	RTTSampleExpiry                time.Duration
+	PiggybackEnabled               bool
+	StabilizeDebounceThreshold     int
+	TopologyChangeWindow           time.Duration
+	StabilizeActiveInterval        time.Duration
+	StabilizeQuietInterval         time.Duration
+	FixFingersActiveInterval       time.Duration
+	FixFingersQuietInterval        time.Duration
+	CheckPredecessorActiveInterval time.Duration
+	CheckPredecessorQuietInterval  time.Duration
 }
 
 func DefaultOptions() Options {
@@ -148,6 +148,7 @@ type Node struct {
 	tracker           TrackerClient
 	options           Options
 	failures          map[string]int
+	bootstrapSeeds    []NodeInfo
 
 	// v3.0 fields
 	region                 string
@@ -435,6 +436,11 @@ func (n *Node) ActivateSingleNode() {
 }
 
 func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
+	seeds := n.collectBootstrapSeeds(manualSeeds)
+	return n.joinNetworkWithSeeds(seeds)
+}
+
+func (n *Node) collectBootstrapSeeds(manualSeeds []NodeInfo) []NodeInfo {
 	var seeds []NodeInfo
 	if n.tracker != nil {
 		trackerSeeds, err := n.tracker.Seeds(n.options.TrackerSeedCount, []string{n.self.NodeID})
@@ -448,8 +454,12 @@ func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
 	logging.Infof("manual seeds configured count=%d", len(manualSeeds))
 	seeds = append(seeds, manualSeeds...)
 	seeds = dedupeNodes(seeds, n.self.NodeID)
+	n.setBootstrapSeeds(seeds)
 	logging.Infof("joining network seeds=%d", len(seeds))
+	return seeds
+}
 
+func (n *Node) joinNetworkWithSeeds(seeds []NodeInfo) error {
 	n.mu.Lock()
 	n.status = StatusJoining
 	n.mu.Unlock()
@@ -545,6 +555,58 @@ func (n *Node) Region() string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.region
+}
+
+func (n *Node) setBootstrapSeeds(seeds []NodeInfo) {
+	n.mu.Lock()
+	n.bootstrapSeeds = cloneNodes(seeds)
+	n.mu.Unlock()
+}
+
+func (n *Node) getBootstrapSeedsCopy() []NodeInfo {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return cloneNodes(n.bootstrapSeeds)
+}
+
+func (n *Node) shouldRetryBootstrapLocked() bool {
+	if n.client == nil || n.status != StatusActive {
+		return false
+	}
+	if n.predecessor != nil || n.successor.NodeID != n.self.NodeID {
+		return false
+	}
+	return n.tracker != nil || len(n.bootstrapSeeds) > 0
+}
+
+func (n *Node) retryBootstrapIfSingleton() bool {
+	n.mu.RLock()
+	shouldRetry := n.shouldRetryBootstrapLocked()
+	trackerConfigured := n.tracker != nil
+	n.mu.RUnlock()
+	if !shouldRetry {
+		return false
+	}
+
+	seeds := n.collectBootstrapSeeds(n.getBootstrapSeedsCopy())
+	if len(seeds) == 0 {
+		logging.Debugf("active singleton bootstrap retry skipped; no seeds available")
+		return false
+	}
+
+	logging.Infof("active singleton retrying bootstrap seeds=%d tracker_configured=%t", len(seeds), trackerConfigured)
+	if err := n.joinNetworkWithSeeds(seeds); err != nil {
+		logging.Warnf("active singleton bootstrap retry failed: %v", err)
+		return false
+	}
+
+	n.mu.RLock()
+	recovered := n.status == StatusActive && n.successor.NodeID != n.self.NodeID
+	n.mu.RUnlock()
+	if recovered {
+		logging.Infof("active singleton joined network after bootstrap retry")
+	}
+	return recovered
 }
 
 func cloneNodePtr(node *NodeInfo) *NodeInfo {
