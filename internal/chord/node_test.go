@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -12,11 +13,14 @@ type recordingTracker struct {
 	registered []NodeInfo
 }
 
-func (r *recordingTracker) Seeds(_ int, _ []string) ([]NodeInfo, error)       { return nil, nil }
-func (r *recordingTracker) Register(node NodeInfo) (string, error)            { r.registered = append(r.registered, node); return "", nil }
-func (r *recordingTracker) Deregister(_ string) error                         { return nil }
-func (r *recordingTracker) Heartbeat(_ string, _ TrackerHeartbeat) error      { return nil }
-func (r *recordingTracker) FetchCRL() ([]byte, error)                         { return nil, nil }
+func (r *recordingTracker) Seeds(_ int, _ []string) ([]NodeInfo, error) { return nil, nil }
+func (r *recordingTracker) Register(node NodeInfo) (string, error) {
+	r.registered = append(r.registered, node)
+	return "", nil
+}
+func (r *recordingTracker) Deregister(_ string) error                    { return nil }
+func (r *recordingTracker) Heartbeat(_ string, _ TrackerHeartbeat) error { return nil }
+func (r *recordingTracker) FetchCRL() ([]byte, error)                    { return nil, nil }
 
 // TestVNodeTrackerRegistration verifies that:
 //  1. Anchor's JoinNetwork registers with the tracker.
@@ -110,7 +114,7 @@ func TestNotifyAcceptsCloserPredecessor(t *testing.T) {
 // errClient is a PeerClient that fails every call, used to simulate an unreachable peer.
 type errClient struct{}
 
-func (errClient) Ping(_ string) error             { return errors.New("unreachable") }
+func (errClient) Ping(_ string) error                     { return errors.New("unreachable") }
 func (errClient) PingWithLatency(_ string) (int64, error) { return 0, errors.New("unreachable") }
 func (errClient) FindSuccessor(_ NodeInfo, _ FindSuccessorRequest) (FindSuccessorResponse, error) {
 	return FindSuccessorResponse{}, errors.New("unreachable")
@@ -169,6 +173,179 @@ func TestStabilizeSingleNodeRingStaysActive(t *testing.T) {
 
 	if got := node.Self().Status; got != StatusActive {
 		t.Fatalf("expected StatusActive for single-node ring, got %s", got)
+	}
+}
+
+type retryJoinClient struct {
+	mu                    sync.Mutex
+	joinCalls             int
+	failuresBeforeSuccess int
+	successor             NodeInfo
+}
+
+func (c *retryJoinClient) Ping(_ string) error { return nil }
+func (c *retryJoinClient) PingWithLatency(_ string) (int64, error) {
+	return 1, nil
+}
+func (c *retryJoinClient) FindSuccessor(_ NodeInfo, _ FindSuccessorRequest) (FindSuccessorResponse, error) {
+	c.mu.Lock()
+	successor := c.successor
+	c.mu.Unlock()
+	return FindSuccessorResponse{Found: true, Successor: &successor}, nil
+}
+func (c *retryJoinClient) Join(_ string, _ JoinRequest) (JoinResponse, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.joinCalls++
+	if c.joinCalls <= c.failuresBeforeSuccess {
+		return JoinResponse{}, errors.New("join unavailable")
+	}
+	return JoinResponse{Successor: c.successor, SuccessorList: []NodeInfo{c.successor}}, nil
+}
+func (c *retryJoinClient) Notify(_ NodeInfo, _ NotifyRequest) (NotifyResponse, error) {
+	return NotifyResponse{Accepted: true}, nil
+}
+func (c *retryJoinClient) Predecessor(_ NodeInfo) (PredecessorResponse, error) {
+	return PredecessorResponse{}, nil
+}
+func (c *retryJoinClient) SuccessorList(_ NodeInfo) (SuccessorListResponse, error) {
+	c.mu.Lock()
+	successor := c.successor
+	c.mu.Unlock()
+	return SuccessorListResponse{SuccessorList: []NodeInfo{successor}}, nil
+}
+func (c *retryJoinClient) Leave(_ NodeInfo, _ LeaveRequest) error { return nil }
+func (c *retryJoinClient) RTT(_ string) (RTTResponse, error) {
+	return RTTResponse{Samples: map[string]int64{}}, nil
+}
+func (c *retryJoinClient) JoinCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.joinCalls
+}
+
+type sequenceTracker struct {
+	mu            sync.Mutex
+	seedResponses [][]NodeInfo
+	seedCalls     int
+	registered    []NodeInfo
+}
+
+func (t *sequenceTracker) Seeds(_ int, _ []string) ([]NodeInfo, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	index := t.seedCalls
+	t.seedCalls++
+	if index >= len(t.seedResponses) {
+		index = len(t.seedResponses) - 1
+	}
+	if index < 0 {
+		return nil, nil
+	}
+	return cloneNodes(t.seedResponses[index]), nil
+}
+func (t *sequenceTracker) Register(node NodeInfo) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.registered = append(t.registered, node)
+	return "", nil
+}
+func (t *sequenceTracker) Deregister(_ string) error                    { return nil }
+func (t *sequenceTracker) Heartbeat(_ string, _ TrackerHeartbeat) error { return nil }
+func (t *sequenceTracker) FetchCRL() ([]byte, error)                    { return nil, nil }
+func (t *sequenceTracker) SeedCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.seedCalls
+}
+
+func TestActiveSingletonRetriesStoredBootstrapSeeds(t *testing.T) {
+	seed, err := NewNodeInfoFromURI("https://node2.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &retryJoinClient{failuresBeforeSuccess: 1, successor: seed}
+	node, err := NewNode("https://node1.example.com", DefaultOptions(), client, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := node.JoinNetwork([]NodeInfo{seed}); err != nil {
+		t.Fatal(err)
+	}
+	if got := client.JoinCalls(); got != 1 {
+		t.Fatalf("expected one initial join attempt, got %d", got)
+	}
+	if state := node.State(); state.Successor.NodeID != node.Self().NodeID {
+		t.Fatalf("expected initial failed join to activate singleton, got successor %s", state.Successor.NodeID)
+	}
+
+	node.MaintenanceCycle()
+
+	if got := client.JoinCalls(); got < 2 {
+		t.Fatalf("expected maintenance to retry join, got %d attempts", got)
+	}
+	if state := node.State(); state.Successor.NodeID != seed.NodeID {
+		t.Fatalf("expected retry to join seed successor %s, got %s", seed.NodeID, state.Successor.NodeID)
+	}
+}
+
+func TestActiveSingletonRetriesFreshTrackerSeeds(t *testing.T) {
+	seed, err := NewNodeInfoFromURI("https://node2.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := &sequenceTracker{seedResponses: [][]NodeInfo{nil, {seed}}}
+	client := &retryJoinClient{successor: seed}
+	node, err := NewNode("https://node1.example.com", DefaultOptions(), client, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := node.JoinNetwork(nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := client.JoinCalls(); got != 0 {
+		t.Fatalf("expected no peer join when tracker initially has no seeds, got %d", got)
+	}
+	if state := node.State(); state.Successor.NodeID != node.Self().NodeID {
+		t.Fatalf("expected initial tracker miss to activate singleton, got successor %s", state.Successor.NodeID)
+	}
+
+	node.MaintenanceCycle()
+
+	if got := tracker.SeedCalls(); got < 2 {
+		t.Fatalf("expected maintenance to fetch fresh tracker seeds, got %d seed calls", got)
+	}
+	if got := client.JoinCalls(); got != 1 {
+		t.Fatalf("expected one join after tracker seed appears, got %d", got)
+	}
+	if state := node.State(); state.Successor.NodeID != seed.NodeID {
+		t.Fatalf("expected tracker retry to join seed successor %s, got %s", seed.NodeID, state.Successor.NodeID)
+	}
+}
+
+func TestActiveSingletonWithoutSeedsDoesNotRetryJoin(t *testing.T) {
+	seed, err := NewNodeInfoFromURI("https://node2.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &retryJoinClient{successor: seed}
+	node, err := NewNode("https://node1.example.com", DefaultOptions(), client, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := node.JoinNetwork(nil); err != nil {
+		t.Fatal(err)
+	}
+	node.MaintenanceCycle()
+
+	if got := client.JoinCalls(); got != 0 {
+		t.Fatalf("expected no retry without tracker or saved seeds, got %d join attempts", got)
+	}
+	if got := node.Self().Status; got != StatusActive {
+		t.Fatalf("expected singleton to remain active, got %s", got)
 	}
 }
 
