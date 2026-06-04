@@ -257,6 +257,8 @@ func main() {
 				log.Fatalf("vnode join failed index=%d: %v", i+1, err)
 			}
 		}
+		// Re-register anchor now that VNodeEntries is populated.
+		node.RegisterTracker()
 	}
 
 	go node.RunMaintenance(ctx)
