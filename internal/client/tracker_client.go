@@ -46,15 +46,17 @@ func (c *TrackerClient) Seeds(count int, exclude []string) ([]chord.NodeInfo, er
 
 func (c *TrackerClient) Register(node chord.NodeInfo) (string, error) {
 	body := struct {
-		NodeID      string          `json:"node_id"`
-		URI         string          `json:"uri"`
-		Certificate json.RawMessage `json:"certificate,omitempty"`
-		Region      string          `json:"region,omitempty"`
+		NodeID      string             `json:"node_id"`
+		URI         string             `json:"uri"`
+		Certificate json.RawMessage    `json:"certificate,omitempty"`
+		Region      string             `json:"region,omitempty"`
+		Vnodes      []chord.VNodeEntry `json:"vnodes,omitempty"`
 	}{
 		NodeID:      node.NodeID,
 		URI:         node.URI,
 		Certificate: node.Certificate,
 		Region:      node.Region,
+		Vnodes:      node.Vnodes,
 	}
 	var resp struct {
 		Region *string `json:"region"`
