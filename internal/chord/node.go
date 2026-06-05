@@ -11,12 +11,19 @@ import (
 )
 
 type Options struct {
-	SuccessorListSize   int
-	MaintenanceInterval time.Duration
-	MaxHops             int
-	SuspiciousThreshold int
-	FailedThreshold     int
-	TrackerSeedCount    int
+	SuccessorListSize      int
+	MaintenanceInterval    time.Duration
+	MaxHops                int
+	SuspiciousThreshold    int
+	FailedThreshold        int
+	TrackerSeedCount       int
+	PingLivenessTimeout    time.Duration
+	StabilizeAtomicState   bool
+	ValidateAfterStabilize bool
+	RectifyEndpointAlias   bool
+	InvariantAuditInterval time.Duration
+	StableBaseMinSize      int
+	StableBaseMembers      []string
 	// NodeCertificate holds the node's own certificate as raw JSON.
 	// When set, it is attached to JoinRequest, NotifyRequest, and tracker registration.
 	NodeCertificate json.RawMessage
@@ -89,12 +96,17 @@ type Options struct {
 
 func DefaultOptions() Options {
 	return Options{
-		SuccessorListSize:   DefaultSuccessorListSize,
-		MaintenanceInterval: DefaultMaintenanceInterval,
-		MaxHops:             DefaultMaxHops,
-		SuspiciousThreshold: DefaultSuspiciousThreshold,
-		FailedThreshold:     DefaultFailedThreshold,
-		TrackerSeedCount:    DefaultTrackerSeedCount,
+		SuccessorListSize:      DefaultSuccessorListSize,
+		MaintenanceInterval:    DefaultMaintenanceInterval,
+		MaxHops:                DefaultMaxHops,
+		SuspiciousThreshold:    DefaultSuspiciousThreshold,
+		FailedThreshold:        DefaultFailedThreshold,
+		TrackerSeedCount:       DefaultTrackerSeedCount,
+		PingLivenessTimeout:    DefaultPingLivenessTimeout,
+		StabilizeAtomicState:   true,
+		ValidateAfterStabilize: true,
+		RectifyEndpointAlias:   true,
+		InvariantAuditInterval: DefaultInvariantAuditInterval,
 
 		Region:                         "",
 		PredecessorListSize:            DefaultPredecessorListSize,
@@ -131,24 +143,26 @@ func DefaultOptions() Options {
 }
 
 type Node struct {
-	mu                sync.RWMutex
-	self              NodeInfo
-	predecessor       *NodeInfo
-	predecessorList   []NodeInfo
-	successor         NodeInfo
-	successorList     []NodeInfo
-	fingers           []FingerEntry
-	status            Status
-	joinedAt          time.Time
-	startedAt         time.Time
-	lastMaintenanceAt *time.Time
-	nextFingerIndex   int
-	maintenanceCycles atomic.Uint64
-	client            PeerClient
-	tracker           TrackerClient
-	options           Options
-	failures          map[string]int
-	bootstrapSeeds    []NodeInfo
+	mu                 sync.RWMutex
+	self               NodeInfo
+	predecessor        *NodeInfo
+	predecessorList    []NodeInfo
+	successor          NodeInfo
+	successorList      []NodeInfo
+	successorListValid bool
+	lastInvariantCheck *time.Time
+	fingers            []FingerEntry
+	status             Status
+	joinedAt           time.Time
+	startedAt          time.Time
+	lastMaintenanceAt  *time.Time
+	nextFingerIndex    int
+	maintenanceCycles  atomic.Uint64
+	client             PeerClient
+	tracker            TrackerClient
+	options            Options
+	failures           map[string]int
+	bootstrapSeeds     []NodeInfo
 
 	// v3.0 fields
 	region                 string
@@ -188,6 +202,12 @@ func NewNode(uri string, opts Options, client PeerClient, tracker TrackerClient)
 	if opts.TrackerSeedCount <= 0 {
 		opts.TrackerSeedCount = DefaultTrackerSeedCount
 	}
+	if opts.PingLivenessTimeout <= 0 {
+		opts.PingLivenessTimeout = DefaultPingLivenessTimeout
+	}
+	if opts.StableBaseMinSize <= 0 {
+		opts.StableBaseMinSize = opts.SuccessorListSize + 1
+	}
 
 	fingers := make([]FingerEntry, DefaultM)
 	for i := range fingers {
@@ -212,22 +232,23 @@ func NewNode(uri string, opts Options, client PeerClient, tracker TrackerClient)
 	}
 
 	n := &Node{
-		self:             self,
-		successor:        self.Core(),
-		successorList:    []NodeInfo{self.Core()},
-		predecessorList:  make([]NodeInfo, 0, opts.PredecessorListSize),
-		fingers:          fingers,
-		status:           StatusInitializing,
-		startedAt:        time.Now().UTC(),
-		client:           client,
-		tracker:          tracker,
-		options:          opts,
-		failures:         map[string]int{},
-		region:           opts.Region,
-		maintenanceMode:  QuietMaintenance,
-		topologyChangeCh: make(chan struct{}, 1),
-		rttCache:         rttCache,
-		routingCache:     rc,
+		self:               self,
+		successor:          self.Core(),
+		successorList:      []NodeInfo{self.Core()},
+		successorListValid: true,
+		predecessorList:    make([]NodeInfo, 0, opts.PredecessorListSize),
+		fingers:            fingers,
+		status:             StatusInitializing,
+		startedAt:          time.Now().UTC(),
+		client:             client,
+		tracker:            tracker,
+		options:            opts,
+		failures:           map[string]int{},
+		region:             opts.Region,
+		maintenanceMode:    QuietMaintenance,
+		topologyChangeCh:   make(chan struct{}, 1),
+		rttCache:           rttCache,
+		routingCache:       rc,
 	}
 	n.self.Region = opts.Region
 	return n, nil
@@ -316,19 +337,45 @@ func (n *Node) State() StateResponse {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return StateResponse{
-		NodeID:            n.self.NodeID,
-		URI:               n.self.URI,
-		Status:            n.status,
-		Predecessor:       cloneNodePtr(n.predecessor),
-		PredecessorList:   cloneNodes(n.predecessorList),
-		Successor:         n.successor,
-		SuccessorList:     cloneNodes(n.successorList),
-		FingerTable:       cloneFingers(n.fingers),
-		LastMaintenanceAt: cloneTimePtr(n.lastMaintenanceAt),
-		NextFingerIndex:   n.nextFingerIndex,
-		MaintenanceMode:   n.maintenanceMode,
-		Region:            n.region,
+		NodeID:             n.self.NodeID,
+		URI:                n.self.URI,
+		Status:             n.status,
+		Predecessor:        cloneNodePtr(n.predecessor),
+		PredecessorList:    cloneNodes(n.predecessorList),
+		Successor:          n.successor,
+		SuccessorList:      cloneNodes(n.successorList),
+		FingerTable:        cloneFingers(n.fingers),
+		LastMaintenanceAt:  cloneTimePtr(n.lastMaintenanceAt),
+		NextFingerIndex:    n.nextFingerIndex,
+		MaintenanceMode:    n.maintenanceMode,
+		Region:             n.region,
+		SuccessorListValid: n.successorListValid,
+		LastInvariantCheck: cloneTimePtr(n.lastInvariantCheck),
+		IsStableBaseMember: n.isStableBaseMemberLocked(),
+		SnapshotTimestamp:  time.Now().UTC(),
 	}
+}
+
+func (n *Node) InvariantReport() InvariantReportResponse {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	violations := n.successorListViolationsLocked(n.successorList)
+	return InvariantReportResponse{
+		NodeID:             n.self.NodeID,
+		Status:             n.status,
+		Successor:          n.successor,
+		SuccessorList:      cloneNodes(n.successorList),
+		SuccessorListValid: n.successorListValid && len(violations) == 0,
+		LastInvariantCheck: cloneTimePtr(n.lastInvariantCheck),
+		Violations:         violations,
+		SnapshotTimestamp:  time.Now().UTC(),
+	}
+}
+
+func (n *Node) RectifyEndpointAliasEnabled() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.options.RectifyEndpointAlias
 }
 
 func (n *Node) FingerTable() FingerTableResponse {
@@ -427,12 +474,27 @@ func (n *Node) ActivateSingleNode() {
 	n.predecessor = nil
 	n.successor = n.self.Core()
 	n.successorList = []NodeInfo{n.self.Core()}
+	n.successorListValid = true
+	now := time.Now().UTC()
+	n.lastInvariantCheck = &now
 	for i := range n.fingers {
 		n.fingers[i].Node = n.self.Core()
 		n.fingers[i].Status = FingerOK
 	}
 	n.mu.Unlock()
 	logging.Infof("node activated as single-node ring node_id=%s", selfID)
+}
+
+func (n *Node) isStableBaseMemberLocked() bool {
+	if n.options.AnchorID != "" && n.options.VNodeIndex > 0 {
+		return false
+	}
+	for _, uri := range n.options.StableBaseMembers {
+		if uri == n.self.URI {
+			return true
+		}
+	}
+	return false
 }
 
 func (n *Node) JoinNetwork(manualSeeds []NodeInfo) error {
@@ -494,17 +556,26 @@ func (n *Node) joinNetworkWithSeeds(seeds []NodeInfo) error {
 			logging.Warnf("join via seed returned invalid successor seed_node_id=%s successor_node_id=%s successor_uri=%s error=%v", seed.NodeID, resp.Successor.NodeID, resp.Successor.URI, err)
 			continue
 		}
+		successorListSeed := resp.SuccessorList
+		if n.options.StabilizeAtomicState && n.client != nil {
+			if state, err := n.client.State(resp.Successor); err == nil {
+				successorListSeed = state.SuccessorList
+			} else {
+				logging.Warnf("join successor state lookup failed successor=%s error=%v", resp.Successor.NodeID, err)
+			}
+		}
 		n.mu.Lock()
 		n.predecessor = nil
 		n.successor = resp.Successor.Core()
-		n.successorList = n.mergeSuccessorListLocked(resp.Successor.Core(), resp.SuccessorList)
+		n.successorList = n.mergeSuccessorListLocked(resp.Successor.Core(), successorListSeed)
 		n.fingers[0].Node = resp.Successor.Core()
 		n.fingers[0].Status = FingerOK
 		n.joinedAt = time.Now().UTC()
 		n.status = StatusActive
 		n.mu.Unlock()
 		logging.Infof("joined network via seed=%s successor=%s successor_list_size=%d", seed.NodeID, resp.Successor.NodeID, len(resp.SuccessorList))
-		_, _ = n.client.Notify(resp.Successor, NotifyRequest{Node: selfWithCert})
+		n.rectifyPeer(resp.Successor, RectifyRequest{Node: selfWithCert})
+		n.validateSuccessorList()
 		n.registerTracker()
 		go n.warmUpFingerTable()
 		return nil

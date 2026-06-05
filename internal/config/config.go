@@ -29,78 +29,86 @@ type AuthConfig struct {
 }
 
 type Config struct {
-	NodeURI             string
-	ListenAddr          string
-	TLSCertFile         string
-	TLSKeyFile          string
-	SkipTLSVerify       bool
-	LogLevel            string
-	TrackerURL          string
-	ManualSeeds         []string
-	HTTPTimeout         time.Duration
-	MaintenanceInterval time.Duration
-	SuccessorListSize   int
-	MaxHops             int
-	SuspiciousThreshold int
-	FailedThreshold     int
-	TrackerSeedCount    int
-	Auth                AuthConfig
+	NodeURI                string
+	ListenAddr             string
+	TLSCertFile            string
+	TLSKeyFile             string
+	SkipTLSVerify          bool
+	LogLevel               string
+	TrackerURL             string
+	ManualSeeds            []string
+	HTTPTimeout            time.Duration
+	MaintenanceInterval    time.Duration
+	SuccessorListSize      int
+	MaxHops                int
+	SuspiciousThreshold    int
+	FailedThreshold        int
+	TrackerSeedCount       int
+	PingLivenessTimeout    time.Duration
+	StabilizeAtomicState   bool
+	ValidateAfterStabilize bool
+	RectifyEndpointAlias   bool
+	InvariantAuditInterval time.Duration
+	StableBaseMinSize      int
+	StableBaseMembers      []string
+	Auth                   AuthConfig
 
 	// v4.0 vnode fields
-	VNodeCount                    int
-	MaxVNodes                     int
-	VNodeProofTTL                 time.Duration
-	VNodeProofRenewBefore         time.Duration
-	ClockSkewTolerance            time.Duration
-	VNodeGoroutineLimit           int
-	VNodeMaintenanceJitter        time.Duration
-	SiblingRouteMaxHops           int
-	SuccessorListSiblingCap       float64
-	VNodeBootstrapPreferExt       bool
-	SharedNodeInfoCacheSize       int
-	SharedNodeInfoCacheTTL        time.Duration
-	SharedRTTCacheTTL             time.Duration
-	SharedRouteCacheSize          int
-	SharedRouteCacheTTL           time.Duration
-	SharedProofVerifyCacheSize    int
-	TransferTimeout               time.Duration
+	VNodeCount                 int
+	MaxVNodes                  int
+	VNodeProofTTL              time.Duration
+	VNodeProofRenewBefore      time.Duration
+	ClockSkewTolerance         time.Duration
+	VNodeGoroutineLimit        int
+	VNodeMaintenanceJitter     time.Duration
+	SiblingRouteMaxHops        int
+	SuccessorListSiblingCap    float64
+	VNodeBootstrapPreferExt    bool
+	SharedNodeInfoCacheSize    int
+	SharedNodeInfoCacheTTL     time.Duration
+	SharedRTTCacheTTL          time.Duration
+	SharedRouteCacheSize       int
+	SharedRouteCacheTTL        time.Duration
+	SharedProofVerifyCacheSize int
+	TransferTimeout            time.Duration
 
 	// v3.0 fields
-	NodeRegion                         string
-	PredecessorListSize                int
-	FixFingersBatchSizeActive          int
-	FixFingersBatchSizeQuiet           int
-	RoutingCacheEnabled                bool
-	RoutingCacheSize                   int
-	RoutingCacheTTL                    time.Duration
-	LatencyWeightID                    float64
-	LatencyWeightRTT                   float64
-	LatencyWeightRegion                float64
-	ParallelLookupEnabled              bool
-	ParallelLookupCandidates           int
-	TimeoutPingSameRegion              time.Duration
-	TimeoutPingCrossRegion             time.Duration
-	TimeoutFindSuccessorSame           time.Duration
-	TimeoutFindSuccessorCross          time.Duration
-	TimeoutFixFingersSame              time.Duration
-	TimeoutFixFingersCross             time.Duration
-	LatencyProbeIntervalActive         time.Duration
-	LatencyProbeIntervalQuiet          time.Duration
-	RTTEWMAAlpha                       float64
-	RTTSampleExpiry                    time.Duration
-	PiggybackEnabled                   bool
-	StabilizeDebounceThreshold         int
-	TopologyChangeWindow               time.Duration
-	StabilizeActiveInterval            time.Duration
-	StabilizeQuietInterval             time.Duration
-	FixFingersActiveInterval           time.Duration
-	FixFingersQuietInterval            time.Duration
-	CheckPredecessorActiveInterval     time.Duration
-	CheckPredecessorQuietInterval      time.Duration
+	NodeRegion                     string
+	PredecessorListSize            int
+	FixFingersBatchSizeActive      int
+	FixFingersBatchSizeQuiet       int
+	RoutingCacheEnabled            bool
+	RoutingCacheSize               int
+	RoutingCacheTTL                time.Duration
+	LatencyWeightID                float64
+	LatencyWeightRTT               float64
+	LatencyWeightRegion            float64
+	ParallelLookupEnabled          bool
+	ParallelLookupCandidates       int
+	TimeoutPingSameRegion          time.Duration
+	TimeoutPingCrossRegion         time.Duration
+	TimeoutFindSuccessorSame       time.Duration
+	TimeoutFindSuccessorCross      time.Duration
+	TimeoutFixFingersSame          time.Duration
+	TimeoutFixFingersCross         time.Duration
+	LatencyProbeIntervalActive     time.Duration
+	LatencyProbeIntervalQuiet      time.Duration
+	RTTEWMAAlpha                   float64
+	RTTSampleExpiry                time.Duration
+	PiggybackEnabled               bool
+	StabilizeDebounceThreshold     int
+	TopologyChangeWindow           time.Duration
+	StabilizeActiveInterval        time.Duration
+	StabilizeQuietInterval         time.Duration
+	FixFingersActiveInterval       time.Duration
+	FixFingersQuietInterval        time.Duration
+	CheckPredecessorActiveInterval time.Duration
+	CheckPredecessorQuietInterval  time.Duration
 }
 
 func Load() (Config, error) {
 	var seeds string
+	var stableBaseMembers string
 	cfg := Config{}
 	flag.StringVar(&cfg.NodeURI, "uri", "", "canonical node https:// URI")
 	flag.StringVar(&cfg.ListenAddr, "listen", "", "TLS listen address, defaults to URI port")
@@ -117,6 +125,13 @@ func Load() (Config, error) {
 	flag.IntVar(&cfg.SuspiciousThreshold, "suspicious-threshold", chord.DefaultSuspiciousThreshold, "suspicious threshold")
 	flag.IntVar(&cfg.FailedThreshold, "failed-threshold", chord.DefaultFailedThreshold, "failed threshold")
 	flag.IntVar(&cfg.TrackerSeedCount, "tracker-seed-count", chord.DefaultTrackerSeedCount, "tracker seed count")
+	flag.DurationVar(&cfg.PingLivenessTimeout, "ping-liveness-timeout", chord.DefaultPingLivenessTimeout, "liveness ping timeout")
+	flag.BoolVar(&cfg.StabilizeAtomicState, "stabilize-atomic-state", true, "use atomic /state RPC during stabilize")
+	flag.BoolVar(&cfg.ValidateAfterStabilize, "validate-after-stabilize", true, "validate successor list after stabilize")
+	flag.BoolVar(&cfg.RectifyEndpointAlias, "rectify-endpoint-alias", true, "serve /notify as a /rectify compatibility alias")
+	flag.DurationVar(&cfg.InvariantAuditInterval, "invariant-audit-interval", chord.DefaultInvariantAuditInterval, "debug invariant audit interval, 0 disables")
+	flag.IntVar(&cfg.StableBaseMinSize, "stable-base-min-size", 0, "stable base minimum size, defaults to successor-list-size+1")
+	flag.StringVar(&stableBaseMembers, "stable-base-members", "", "comma-separated stable base anchor https:// URIs")
 	flag.BoolVar(&cfg.Auth.Enabled, "auth.enabled", false, "enable node identity authentication")
 	flag.StringVar(&cfg.Auth.CAPublicKeyBase64, "auth.ca-public-key-base64", "", "CA Ed25519 public key (base64url)")
 	flag.StringVar(&cfg.Auth.NodeCertificateFile, "auth.node-certificate-file", "", "node certificate JSON file")
@@ -199,6 +214,13 @@ func Load() (Config, error) {
 	applyEnvInt("CHORD_SUSPICIOUS_THRESHOLD", &cfg.SuspiciousThreshold)
 	applyEnvInt("CHORD_FAILED_THRESHOLD", &cfg.FailedThreshold)
 	applyEnvInt("TRACKER_SEED_COUNT", &cfg.TrackerSeedCount)
+	applyEnvDuration("CHORD_PING_LIVENESS_TIMEOUT_SECONDS", &cfg.PingLivenessTimeout)
+	applyEnvBool("CHORD_STABILIZE_ATOMIC_STATE", &cfg.StabilizeAtomicState)
+	applyEnvBool("CHORD_VALIDATE_AFTER_STABILIZE", &cfg.ValidateAfterStabilize)
+	applyEnvBool("CHORD_RECTIFY_ENDPOINT_ALIAS", &cfg.RectifyEndpointAlias)
+	applyEnvDuration("CHORD_INVARIANT_AUDIT_INTERVAL_SECONDS", &cfg.InvariantAuditInterval)
+	applyEnvInt("CHORD_STABLE_BASE_MIN_SIZE", &cfg.StableBaseMinSize)
+	applyEnv("CHORD_STABLE_BASE_MEMBERS", &stableBaseMembers)
 	applyEnvBool("CHORD_AUTH_ENABLED", &cfg.Auth.Enabled)
 	applyEnv("CHORD_AUTH_CA_PUBLIC_KEY_BASE64", &cfg.Auth.CAPublicKeyBase64)
 	applyEnv("CHORD_AUTH_NODE_CERT_FILE", &cfg.Auth.NodeCertificateFile)
@@ -293,6 +315,20 @@ func Load() (Config, error) {
 		}
 		cfg.ManualSeeds = append(cfg.ManualSeeds, normalizedSeed)
 	}
+	for _, member := range strings.Split(stableBaseMembers, ",") {
+		member = strings.TrimSpace(member)
+		if member == "" {
+			continue
+		}
+		normalizedMember, err := chord.NormalizeURI(member)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.StableBaseMembers = append(cfg.StableBaseMembers, normalizedMember)
+	}
+	if cfg.StableBaseMinSize <= 0 {
+		cfg.StableBaseMinSize = cfg.SuccessorListSize + 1
+	}
 	if cfg.Auth.Enabled {
 		if cfg.Auth.CAPublicKeyBase64 == "" {
 			return Config{}, errors.New("auth.ca-public-key-base64 is required when auth is enabled")
@@ -310,29 +346,36 @@ func Load() (Config, error) {
 func (c Config) ChordOptions() chord.Options {
 	return chord.Options{
 		// v4.0 vnode options
-		MaxVNodes:               c.MaxVNodes,
-		VNodeProofTTL:           c.VNodeProofTTL,
-		VNodeProofRenewBefore:   c.VNodeProofRenewBefore,
-		ClockSkewTolerance:      c.ClockSkewTolerance,
-		VNodeGoroutineLimit:     c.VNodeGoroutineLimit,
-		VNodeMaintenanceJitter:  c.VNodeMaintenanceJitter,
-		SiblingRouteMaxHops:     c.SiblingRouteMaxHops,
-		SuccessorListSiblingCap: c.SuccessorListSiblingCap,
-		VNodeBootstrapPreferExt: c.VNodeBootstrapPreferExt,
-		SharedNodeInfoCacheSize:  c.SharedNodeInfoCacheSize,
-		SharedNodeInfoCacheTTL:   c.SharedNodeInfoCacheTTL,
-		SharedRTTCacheTTL:        c.SharedRTTCacheTTL,
-		SharedRouteCacheSize:     c.SharedRouteCacheSize,
-		SharedRouteCacheTTL:      c.SharedRouteCacheTTL,
+		MaxVNodes:                  c.MaxVNodes,
+		VNodeProofTTL:              c.VNodeProofTTL,
+		VNodeProofRenewBefore:      c.VNodeProofRenewBefore,
+		ClockSkewTolerance:         c.ClockSkewTolerance,
+		VNodeGoroutineLimit:        c.VNodeGoroutineLimit,
+		VNodeMaintenanceJitter:     c.VNodeMaintenanceJitter,
+		SiblingRouteMaxHops:        c.SiblingRouteMaxHops,
+		SuccessorListSiblingCap:    c.SuccessorListSiblingCap,
+		VNodeBootstrapPreferExt:    c.VNodeBootstrapPreferExt,
+		SharedNodeInfoCacheSize:    c.SharedNodeInfoCacheSize,
+		SharedNodeInfoCacheTTL:     c.SharedNodeInfoCacheTTL,
+		SharedRTTCacheTTL:          c.SharedRTTCacheTTL,
+		SharedRouteCacheSize:       c.SharedRouteCacheSize,
+		SharedRouteCacheTTL:        c.SharedRouteCacheTTL,
 		SharedProofVerifyCacheSize: c.SharedProofVerifyCacheSize,
-		TransferTimeout:          c.TransferTimeout,
+		TransferTimeout:            c.TransferTimeout,
 
-		SuccessorListSize:   c.SuccessorListSize,
-		MaintenanceInterval: c.MaintenanceInterval,
-		MaxHops:             c.MaxHops,
-		SuspiciousThreshold: c.SuspiciousThreshold,
-		FailedThreshold:     c.FailedThreshold,
-		TrackerSeedCount:    c.TrackerSeedCount,
+		SuccessorListSize:      c.SuccessorListSize,
+		MaintenanceInterval:    c.MaintenanceInterval,
+		MaxHops:                c.MaxHops,
+		SuspiciousThreshold:    c.SuspiciousThreshold,
+		FailedThreshold:        c.FailedThreshold,
+		TrackerSeedCount:       c.TrackerSeedCount,
+		PingLivenessTimeout:    c.PingLivenessTimeout,
+		StabilizeAtomicState:   c.StabilizeAtomicState,
+		ValidateAfterStabilize: c.ValidateAfterStabilize,
+		RectifyEndpointAlias:   c.RectifyEndpointAlias,
+		InvariantAuditInterval: c.InvariantAuditInterval,
+		StableBaseMinSize:      c.StableBaseMinSize,
+		StableBaseMembers:      c.StableBaseMembers,
 
 		Region:                         c.NodeRegion,
 		PredecessorListSize:            c.PredecessorListSize,

@@ -32,21 +32,41 @@ func (n *Node) HandleJoin(req JoinRequest) (JoinResponse, error) {
 }
 
 func (n *Node) HandleNotify(req NotifyRequest) (NotifyResponse, error) {
+	return n.HandleRectify(req)
+}
+
+func (n *Node) HandleRectify(req RectifyRequest) (RectifyResponse, error) {
 	if err := ValidateNodeInfo(req.Node); err != nil {
-		return NotifyResponse{}, NewAPIError(http.StatusBadRequest, ErrInvalidRequest, err.Error())
+		return RectifyResponse{}, NewAPIError(http.StatusBadRequest, ErrInvalidRequest, err.Error())
 	}
-	n.mu.Lock()
-	if n.status == StatusLeaving {
-		n.mu.Unlock()
-		return NotifyResponse{}, NewAPIError(http.StatusServiceUnavailable, ErrNodeLeaving, "node is leaving")
-	}
-	accepted := false
 	candidate := req.Node.Core()
+	n.mu.RLock()
+	status := n.status
+	selfID := n.self.NodeID
+	currentPredecessor := cloneNodePtr(n.predecessor)
+	n.mu.RUnlock()
+	if status == StatusLeaving {
+		return RectifyResponse{}, NewAPIError(http.StatusServiceUnavailable, ErrNodeLeaving, "node is leaving")
+	}
+	if status == StatusJoining {
+		return RectifyResponse{}, NewAPIError(http.StatusServiceUnavailable, ErrNodeJoining, "node is joining")
+	}
+	if candidate.NodeID == selfID {
+		return RectifyResponse{}, NewAPIError(http.StatusBadRequest, ErrInvalidRequest, "candidate cannot be this node")
+	}
+
+	predecessorAlive := true
+	if currentPredecessor != nil && currentPredecessor.NodeID != selfID && n.client != nil {
+		predecessorAlive = n.pingLiveness(*currentPredecessor)
+	}
+
+	n.mu.Lock()
+	accepted := false
 	var previousPredecessor string
 	if n.predecessor != nil {
 		previousPredecessor = n.predecessor.NodeID
 	}
-	if candidate.NodeID != n.self.NodeID && (n.predecessor == nil || InRangeOpenOpen(candidate.NodeID, n.predecessor.NodeID, n.self.NodeID)) {
+	if n.predecessor == nil || (currentPredecessor != nil && n.predecessor.NodeID == currentPredecessor.NodeID && !predecessorAlive) || InRangeOpenOpen(candidate.NodeID, n.predecessor.NodeID, n.self.NodeID) {
 		// Update predecessor chain: shift existing predecessor to [1], new candidate to [0].
 		p := n.options.PredecessorListSize
 		if p <= 0 {
@@ -89,9 +109,9 @@ func (n *Node) HandleNotify(req NotifyRequest) (NotifyResponse, error) {
 			}()
 		}
 	} else {
-		logging.Debugf("rejected predecessor notification from=%s current=%s", candidate.NodeID, previousPredecessor)
+		logging.Debugf("rejected predecessor rectify from=%s current=%s", candidate.NodeID, previousPredecessor)
 	}
-	return NotifyResponse{Accepted: accepted, Predecessor: currentPred}, nil
+	return RectifyResponse{Accepted: accepted, Predecessor: currentPred}, nil
 }
 
 func (n *Node) HandleLeave(req LeaveRequest) (LeaveResponse, error) {
@@ -128,6 +148,12 @@ func (n *Node) successorListFor(successor NodeInfo) []NodeInfo {
 	}
 	if n.client == nil {
 		return []NodeInfo{successor.Core()}
+	}
+	if n.options.StabilizeAtomicState {
+		state, err := n.client.State(successor)
+		if err == nil {
+			return append([]NodeInfo{successor.Core()}, state.SuccessorList...)
+		}
 	}
 	resp, err := n.client.SuccessorList(successor)
 	if err != nil {

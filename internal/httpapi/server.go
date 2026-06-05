@@ -127,12 +127,33 @@ func (s *Server) registerNodeRoutes(mux *http.ServeMux, base string, node *chord
 			methodNotAllowed(w)
 			return
 		}
+		if !node.RectifyEndpointAliasEnabled() {
+			writeError(w, chord.NewAPIError(http.StatusNotFound, chord.ErrNodeNotFound, "notify alias is disabled"))
+			return
+		}
 		var req chord.NotifyRequest
 		if !decodeJSON(w, r, &req) {
 			return
 		}
 		s.cacheNodeCert(req.Node.Certificate)
-		resp, err := node.HandleNotify(req)
+		resp, err := node.HandleRectify(req)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	})
+	mux.HandleFunc(base+"rectify", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		var req chord.RectifyRequest
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+		s.cacheNodeCert(req.Node.Certificate)
+		resp, err := node.HandleRectify(req)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -200,6 +221,13 @@ func (s *Server) registerNodeRoutes(mux *http.ServeMux, base string, node *chord
 			return
 		}
 		writeJSON(w, http.StatusOK, node.NodeStatusInfo())
+	})
+	mux.HandleFunc(base+"invariant", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		writeJSON(w, http.StatusOK, node.InvariantReport())
 	})
 	mux.HandleFunc(base+"transfer_keys", makeTransferKeysHandler(node))
 	mux.HandleFunc(base+"transfer_ack", makeTransferAckHandler(node))
