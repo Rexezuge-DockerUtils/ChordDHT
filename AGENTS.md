@@ -1,10 +1,11 @@
 # AGENTS.md
 
 ## Repo Shape
-- This is a small Go module (`module chorddht`, Go 1.26) with no external dependencies, Makefile, CI workflow, or useful README content.
+- This is a small Go module (`module chorddht`, Go 1.26) with no external dependencies or Makefile. The README documents the current v5.0 protocol surface.
 - `cmd/node` is the only executable. It starts an HTTPS Chord DHT node and wires `internal/config`, `internal/chord`, `internal/client`, `internal/httpapi`, and `internal/logging`.
 - `internal/chord` owns ring state, lookup, join/leave, stabilization, successor lists, finger repair, and tracker reporting. `internal/httpapi` is only the JSON HTTP wrapper around `chord.Node` methods.
 - **v4.0 vnode architecture**: `internal/chord/vnode_proof.go` contains `VNodeProof`, `DeriveVNodeID`, `SignVNodeProof`, `VerifyVNodeProof`. `internal/chord/shared_resources.go` contains `NodeInfoCache` and `ProofVerifyCache` (L0 shared resources). `httpapi.NodePool` wraps the anchor + vnodes and routes `/chord/node/{id}/*` paths. `PeerClient` methods that need vnode-specific routing take `NodeInfo` (not just `string`): `FindSuccessor`, `Notify`, `Predecessor`, `SuccessorList`, `Leave`.
+- **v5.0 Zave corrections**: `HandleRectify` replaces Notify semantics while `/notify` remains a configurable alias. Stabilize should use `PeerClient.State` to get atomic predecessor+successor-list snapshots, ping candidate predecessors with `PingLiveness`, then call `Rectify`. Join must initialize successor lists as `[successor] + successor.successor_list[:r-1]`. `validateSuccessorList` maintains `successor_list_valid` and `last_invariant_check`; `/chord/invariant` exposes a debug report.
 
 ## Commands
 - Run all tests: `go test ./...`
@@ -19,14 +20,16 @@
 - CLI duration flags use Go duration syntax (for example `-http-timeout=5s`); env duration values are integer seconds (`CHORD_HTTP_TIMEOUT_SECONDS`, `CHORD_MAINTENANCE_INTERVAL_SECONDS`).
 - `TRACKER_URL` is optional. If no tracker or manual seeds are usable, `JoinNetwork` activates a single-node ring instead of failing.
 - `CHORD_SKIP_TLS_VERIFY=true` is only for outbound peer/tracker clients; the local server still requires cert/key files.
+- v5 stable-base settings are operational preconditions, not routing logic. Configure physical anchor URIs with `CHORD_STABLE_BASE_MEMBERS`; VNodes do not count toward `CHORD_STABLE_BASE_MIN_SIZE`.
 
 ## API/Protocol Notes
 - JSON request handlers call `DisallowUnknownFields`, so tests/clients should not send extra fields.
 - Main Chord endpoints are under `/chord/*` (legacy, routes to anchor) and `/chord/node/{node_id}/*` (v4.0, routes to specific vnode or anchor by ID).
 - `NodeInfo` validation requires a 40-character lowercase hex `node_id` matching `sha1(uri)` for anchors. For vnodes (`anchor_id != ""`), the ID check is skipped — vnode IDs are derived, not URI-based.
 - Tracker endpoints are external assumptions only. This repo does not implement a tracker server.
-- The `PeerClient` interface uses `NodeInfo` (not URI strings) for `FindSuccessor`, `Notify`, `Predecessor`, `SuccessorList`, `Leave` so the client can automatically route to `/chord/node/{id}/` when `target.AnchorID != ""`.
-- Test mocks that implement `PeerClient` must provide all nine methods (including the NodeInfo-based ones).
+- v5 endpoints: `POST /chord/rectify`, `GET /chord/invariant`, and extended `GET /chord/state` fields (`successor_list_valid`, `last_invariant_check`, `is_stable_base_member`, `snapshot_timestamp`).
+- The `PeerClient` interface uses `NodeInfo` (not URI strings) for `FindSuccessor`, `Notify`, `Rectify`, `State`, `Predecessor`, `SuccessorList`, `Leave` so the client can automatically route to `/chord/node/{id}/` when `target.AnchorID != ""`.
+- Test mocks that implement `PeerClient` must provide all methods: `Ping`, `PingLiveness`, `PingWithLatency`, `FindSuccessor`, `Join`, `Notify`, `Rectify`, `State`, `Predecessor`, `SuccessorList`, `Leave`, and `RTT`.
 
 ## Git Commit Messages
 

@@ -10,13 +10,14 @@ import (
 
 // TimeoutConfig holds per-operation tiered timeouts for same vs. cross-region peers.
 type TimeoutConfig struct {
-	PingSame         time.Duration
-	PingCross        time.Duration
-	FindSuccessorSame time.Duration
+	PingSame           time.Duration
+	PingCross          time.Duration
+	PingLiveness       time.Duration
+	FindSuccessorSame  time.Duration
 	FindSuccessorCross time.Duration
-	FixFingersSame   time.Duration
-	FixFingersCross  time.Duration
-	Default          time.Duration
+	FixFingersSame     time.Duration
+	FixFingersCross    time.Duration
+	Default            time.Duration
 }
 
 type ChordClient struct {
@@ -37,6 +38,7 @@ func NewChordClient(timeout time.Duration, skipTLSVerify bool, signer *auth.Requ
 		timeouts: TimeoutConfig{
 			PingSame:           chord.DefaultTimeoutPingSameRegion,
 			PingCross:          chord.DefaultTimeoutPingCrossRegion,
+			PingLiveness:       chord.DefaultPingLivenessTimeout,
 			FindSuccessorSame:  chord.DefaultTimeoutFindSuccessorSame,
 			FindSuccessorCross: chord.DefaultTimeoutFindSuccessorCross,
 			FixFingersSame:     chord.DefaultTimeoutFixFingersSame,
@@ -85,6 +87,11 @@ func (c *ChordClient) timeoutFor(op, uri string) time.Duration {
 			return c.timeouts.PingSame
 		}
 		return c.timeouts.PingCross
+	case "ping_liveness":
+		if c.timeouts.PingLiveness > 0 {
+			return c.timeouts.PingLiveness
+		}
+		return chord.DefaultPingLivenessTimeout
 	case "find_successor":
 		if same {
 			return c.timeouts.FindSuccessorSame
@@ -126,6 +133,14 @@ func pathFor(target chord.NodeInfo, op string) string {
 
 func (c *ChordClient) Ping(uri string) error {
 	endpoint, err := c.endpointFor(uri, "ping")
+	if err != nil {
+		return err
+	}
+	return endpoint.do(http.MethodGet, "/chord/ping", nil, &chord.PingResponse{})
+}
+
+func (c *ChordClient) PingLiveness(uri string) error {
+	endpoint, err := c.endpointFor(uri, "ping_liveness")
 	if err != nil {
 		return err
 	}
@@ -187,6 +202,31 @@ func (c *ChordClient) Notify(target chord.NodeInfo, req chord.NotifyRequest) (ch
 	path := pathFor(target, "notify")
 	var resp chord.NotifyResponse
 	err = endpoint.doSigned(http.MethodPost, path, req, &resp, true)
+	return resp, err
+}
+
+func (c *ChordClient) Rectify(target chord.NodeInfo, req chord.RectifyRequest) (chord.RectifyResponse, error) {
+	endpoint, err := c.endpoint(target.URI)
+	if err != nil {
+		return chord.RectifyResponse{}, err
+	}
+	path := pathFor(target, "rectify")
+	var resp chord.RectifyResponse
+	err = endpoint.doSigned(http.MethodPost, path, req, &resp, true)
+	return resp, err
+}
+
+func (c *ChordClient) State(target chord.NodeInfo) (chord.StateResponse, error) {
+	endpoint, err := c.endpoint(target.URI)
+	if err != nil {
+		return chord.StateResponse{}, err
+	}
+	path := pathFor(target, "state")
+	var resp chord.StateResponse
+	err = endpoint.doSigned(http.MethodGet, path, nil, &resp, false)
+	if isCertRequired(err) {
+		err = endpoint.doSigned(http.MethodGet, path, nil, &resp, true)
+	}
 	return resp, err
 }
 

@@ -7,6 +7,7 @@ const (
 	ErrNodeNotFound    = "NODE_NOT_FOUND"
 	ErrIDCollision     = "ID_COLLISION"
 	ErrNodeIsolated    = "NODE_ISOLATED"
+	ErrNodeJoining     = "NODE_JOINING"
 	ErrMaxHopsExceeded = "MAX_HOPS_EXCEEDED"
 	ErrNodeLeaving     = "NODE_LEAVING"
 	ErrUpstreamTimeout = "UPSTREAM_TIMEOUT"

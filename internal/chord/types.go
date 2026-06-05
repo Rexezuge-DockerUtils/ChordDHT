@@ -6,17 +6,17 @@ import (
 )
 
 const (
-	DefaultM                    = 160
-	DefaultSuccessorListSize    = 5
+	DefaultM                       = 160
+	DefaultSuccessorListSize       = 5
 	DefaultSuccessorListSiblingCap = 0.5
-	DefaultMaintenanceInterval  = 60 * time.Second
-	DefaultHTTPTimeout          = 5 * time.Second
-	DefaultMaxHops              = 161
-	DefaultSuspiciousThreshold  = 1
-	DefaultFailedThreshold      = 3
-	DefaultTrackerSeedCount     = 5
-	DefaultTrackerHeartbeat     = 60 * time.Second
-	DefaultTrackerStaleInterval = 180 * time.Second
+	DefaultMaintenanceInterval     = 60 * time.Second
+	DefaultHTTPTimeout             = 5 * time.Second
+	DefaultMaxHops                 = 161
+	DefaultSuspiciousThreshold     = 1
+	DefaultFailedThreshold         = 3
+	DefaultTrackerSeedCount        = 5
+	DefaultTrackerHeartbeat        = 60 * time.Second
+	DefaultTrackerStaleInterval    = 180 * time.Second
 
 	DefaultPredecessorListSize = 2
 
@@ -29,25 +29,27 @@ const (
 	DefaultRTTEWMAAlpha    = 0.3
 	DefaultRTTSampleExpiry = 300 * time.Second
 
-	DefaultTopologyChangeWindow = 120 * time.Second
+	DefaultTopologyChangeWindow   = 120 * time.Second
+	DefaultPingLivenessTimeout    = 2 * time.Second
+	DefaultInvariantAuditInterval = 300 * time.Second
 
-	DefaultStabilizeActiveInterval           = 15 * time.Second
-	DefaultStabilizeQuietInterval            = 60 * time.Second
-	DefaultFixFingersActiveInterval          = 10 * time.Second
-	DefaultFixFingersQuietInterval           = 30 * time.Second
-	DefaultCheckPredecessorActiveInterval    = 10 * time.Second
-	DefaultCheckPredecessorQuietInterval     = 30 * time.Second
-	DefaultLatencyProbeActiveInterval        = 30 * time.Second
-	DefaultLatencyProbeQuietInterval         = 120 * time.Second
-	DefaultStabilizeDebounceThreshold        = 3
-	DefaultVNodeMaintenanceJitter            = 5 * time.Second
+	DefaultStabilizeActiveInterval        = 15 * time.Second
+	DefaultStabilizeQuietInterval         = 60 * time.Second
+	DefaultFixFingersActiveInterval       = 10 * time.Second
+	DefaultFixFingersQuietInterval        = 30 * time.Second
+	DefaultCheckPredecessorActiveInterval = 10 * time.Second
+	DefaultCheckPredecessorQuietInterval  = 30 * time.Second
+	DefaultLatencyProbeActiveInterval     = 30 * time.Second
+	DefaultLatencyProbeQuietInterval      = 120 * time.Second
+	DefaultStabilizeDebounceThreshold     = 3
+	DefaultVNodeMaintenanceJitter         = 5 * time.Second
 
-	DefaultTimeoutPingSameRegion        = 2 * time.Second
-	DefaultTimeoutPingCrossRegion       = 5 * time.Second
-	DefaultTimeoutFindSuccessorSame     = 5 * time.Second
-	DefaultTimeoutFindSuccessorCross    = 15 * time.Second
-	DefaultTimeoutFixFingersSame        = 5 * time.Second
-	DefaultTimeoutFixFingersCross       = 30 * time.Second
+	DefaultTimeoutPingSameRegion     = 2 * time.Second
+	DefaultTimeoutPingCrossRegion    = 5 * time.Second
+	DefaultTimeoutFindSuccessorSame  = 5 * time.Second
+	DefaultTimeoutFindSuccessorCross = 15 * time.Second
+	DefaultTimeoutFixFingersSame     = 5 * time.Second
+	DefaultTimeoutFixFingersCross    = 30 * time.Second
 )
 
 type Status string
@@ -154,6 +156,9 @@ type NotifyResponse struct {
 	Predecessor *NodeInfo `json:"predecessor"`
 }
 
+type RectifyRequest = NotifyRequest
+type RectifyResponse = NotifyResponse
+
 type PredecessorResponse struct {
 	Predecessor     *NodeInfo  `json:"predecessor"`
 	PredecessorList []NodeInfo `json:"predecessor_list,omitempty"`
@@ -180,18 +185,33 @@ type LeaveResponse struct {
 }
 
 type StateResponse struct {
-	NodeID            string          `json:"node_id"`
-	URI               string          `json:"uri"`
-	Status            Status          `json:"status"`
-	Predecessor       *NodeInfo       `json:"predecessor"`
-	PredecessorList   []NodeInfo      `json:"predecessor_list,omitempty"`
-	Successor         NodeInfo        `json:"successor"`
-	SuccessorList     []NodeInfo      `json:"successor_list"`
-	FingerTable       []FingerEntry   `json:"finger_table"`
-	LastMaintenanceAt *time.Time      `json:"last_maintenance_at"`
-	NextFingerIndex   int             `json:"next_finger_index"`
-	MaintenanceMode   MaintenanceMode `json:"maintenance_mode,omitempty"`
-	Region            string          `json:"region,omitempty"`
+	NodeID             string          `json:"node_id"`
+	URI                string          `json:"uri"`
+	Status             Status          `json:"status"`
+	Predecessor        *NodeInfo       `json:"predecessor"`
+	PredecessorList    []NodeInfo      `json:"predecessor_list,omitempty"`
+	Successor          NodeInfo        `json:"successor"`
+	SuccessorList      []NodeInfo      `json:"successor_list"`
+	FingerTable        []FingerEntry   `json:"finger_table"`
+	LastMaintenanceAt  *time.Time      `json:"last_maintenance_at"`
+	NextFingerIndex    int             `json:"next_finger_index"`
+	MaintenanceMode    MaintenanceMode `json:"maintenance_mode,omitempty"`
+	Region             string          `json:"region,omitempty"`
+	SuccessorListValid bool            `json:"successor_list_valid"`
+	LastInvariantCheck *time.Time      `json:"last_invariant_check,omitempty"`
+	IsStableBaseMember bool            `json:"is_stable_base_member"`
+	SnapshotTimestamp  time.Time       `json:"snapshot_timestamp"`
+}
+
+type InvariantReportResponse struct {
+	NodeID             string     `json:"node_id"`
+	Status             Status     `json:"status"`
+	Successor          NodeInfo   `json:"successor"`
+	SuccessorList      []NodeInfo `json:"successor_list"`
+	SuccessorListValid bool       `json:"successor_list_valid"`
+	LastInvariantCheck *time.Time `json:"last_invariant_check,omitempty"`
+	Violations         []string   `json:"violations"`
+	SnapshotTimestamp  time.Time  `json:"snapshot_timestamp"`
 }
 
 type FingerTableResponse struct {
@@ -201,17 +221,17 @@ type FingerTableResponse struct {
 }
 
 type TrackerHeartbeat struct {
-	Status                Status          `json:"status"`
-	SuccessorID           *string         `json:"successor_id"`
-	PredecessorID         *string         `json:"predecessor_id"`
-	SuccessorListSize     int             `json:"successor_list_size"`
-	SuccessorListCapacity int             `json:"successor_list_capacity"`
-	FingerTableCoverage   float64         `json:"finger_table_coverage"`
-	UptimeSeconds         int64           `json:"uptime_seconds"`
-	MaintenanceCycles     uint64          `json:"maintenance_cycles"`
-	CertExpiresAt         *int64          `json:"cert_expires_at,omitempty"`
-	Region                string          `json:"region,omitempty"`
-	MaintenanceMode       MaintenanceMode `json:"maintenance_mode,omitempty"`
+	Status                Status           `json:"status"`
+	SuccessorID           *string          `json:"successor_id"`
+	PredecessorID         *string          `json:"predecessor_id"`
+	SuccessorListSize     int              `json:"successor_list_size"`
+	SuccessorListCapacity int              `json:"successor_list_capacity"`
+	FingerTableCoverage   float64          `json:"finger_table_coverage"`
+	UptimeSeconds         int64            `json:"uptime_seconds"`
+	MaintenanceCycles     uint64           `json:"maintenance_cycles"`
+	CertExpiresAt         *int64           `json:"cert_expires_at,omitempty"`
+	Region                string           `json:"region,omitempty"`
+	MaintenanceMode       MaintenanceMode  `json:"maintenance_mode,omitempty"`
 	CacheHits             int64            `json:"cache_hits,omitempty"`
 	CacheMisses           int64            `json:"cache_misses,omitempty"`
 	CacheSize             int              `json:"cache_size,omitempty"`
@@ -293,12 +313,17 @@ type TransferAckResponse struct {
 
 type PeerClient interface {
 	Ping(uri string) error
+	PingLiveness(uri string) error
 	PingWithLatency(uri string) (int64, error)
 	// FindSuccessor routes to the correct vnode path when target.AnchorID is set.
 	FindSuccessor(target NodeInfo, req FindSuccessorRequest) (FindSuccessorResponse, error)
 	Join(uri string, req JoinRequest) (JoinResponse, error)
 	// Notify routes to the correct vnode path when target.AnchorID is set.
 	Notify(target NodeInfo, req NotifyRequest) (NotifyResponse, error)
+	// Rectify routes to the correct vnode path when target.AnchorID is set.
+	Rectify(target NodeInfo, req RectifyRequest) (RectifyResponse, error)
+	// State routes to the correct vnode path when target.AnchorID is set.
+	State(target NodeInfo) (StateResponse, error)
 	// Predecessor routes to the correct vnode path when target.AnchorID is set.
 	Predecessor(target NodeInfo) (PredecessorResponse, error)
 	// SuccessorList routes to the correct vnode path when target.AnchorID is set.

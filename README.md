@@ -1,6 +1,6 @@
 # ChordDHT
 
-A learning implementation of the [Chord](https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf) distributed hash table protocol (Stoica et al., ACM SIGCOMM 2001), written in Go with no external dependencies. Now at **v4.0** with virtual nodes (VNodes), VNodeProof credentials, shared L0 resources, and sibling diversity constraints.
+A learning implementation of the [Chord](https://pdos.csail.mit.edu/papers/ton:chord/paper-ton.pdf) distributed hash table protocol (Stoica et al., ACM SIGCOMM 2001), written in Go with no external dependencies. Now at **v5.0** with the Zave protocol corrections from *How to Make Chord Correct*: Rectify, atomic state-based Stabilize, candidate liveness checks, correct Join successor-list initialization, successor-list invariant tracking, and stable-base metadata.
 
 > **Scope:** Chord ring formation and O(log N) key routing only. No key-value storage. Not intended for production use.
 
@@ -21,11 +21,22 @@ Key protocol parameters:
 | ID space | 2¹⁶⁰ (SHA-1) | Matches the original Chord paper |
 | Finger table | 160 entries | Batch-parallel repair (k=8 active / k=4 quiet) |
 | Successor list | r = 5 | Tolerates up to 4 consecutive node failures |
+| Stable base | r + 1 physical anchors | VNodes do not count toward the stable-base minimum |
 | Stabilize interval | 15 s (active) / 60 s (quiet) | Switches on topology events |
 | fix_fingers interval | 10 s (active) / 30 s (quiet) | Exponential-jump repair order |
 | Lookup mode | Iterative + LRU cache | HTTP depth always 1; optional parallel probe |
 | Routing cache | LRU, 1000 entries, 30 s TTL | Interval-aware; cleared on topology change |
 | Region routing | EWMA RTT + region affinity | Score = 0.6·ID + 0.3·RTT + 0.1·region |
+
+### v5.0 additions over v4.0
+
+- **Rectify replaces Notify semantics** — `POST /chord/rectify` checks whether the current predecessor is alive before rejecting a candidate by ID range. `POST /chord/notify` remains a compatibility alias by default.
+- **Atomic Stabilize state RPC** — Stabilize uses `GET /chord/state` to read a successor's predecessor and successor list from one snapshot before making successor decisions.
+- **Candidate liveness validation** — Stabilize pings a candidate predecessor before adopting it as the new successor, preventing dead predecessor references from entering the successor chain.
+- **Correct Join successor-list initialization** — a joining node builds `[successor] + successor.successor_list[:r-1]` before becoming active.
+- **Ordered successor-list checks** — every Stabilize can validate, trim, and extend the successor list; `/chord/state` reports `successor_list_valid`, `last_invariant_check`, and `snapshot_timestamp`.
+- **Invariant diagnostics** — `GET /chord/invariant` returns successor-list validity and violation details for debugging.
+- **Stable-base metadata** — nodes can be configured with stable-base anchor URIs and expose `is_stable_base_member` in state. The tracker monitors stable-base liveness on demand.
 
 ### v4.0 additions over v3.0
 
@@ -106,6 +117,13 @@ Every flag has an environment variable equivalent:
 | `-suspicious-threshold` | `CHORD_SUSPICIOUS_THRESHOLD` | `1` | Consecutive failures before marking a peer suspicious |
 | `-failed-threshold` | `CHORD_FAILED_THRESHOLD` | `3` | Consecutive failures before evicting a peer from routing tables |
 | `-tracker-seed-count` | `TRACKER_SEED_COUNT` | `5` | How many seed nodes to request from the tracker on join |
+| `-ping-liveness-timeout` | `CHORD_PING_LIVENESS_TIMEOUT_SECONDS`¹ | `2s` | Dedicated timeout for v5 liveness pings used by Stabilize/Rectify |
+| `-stabilize-atomic-state` | `CHORD_STABILIZE_ATOMIC_STATE` | `true` | Use `GET /state` snapshots for Stabilize and Join successor-list reads |
+| `-validate-after-stabilize` | `CHORD_VALIDATE_AFTER_STABILIZE` | `true` | Validate and repair the successor list after Stabilize |
+| `-rectify-endpoint-alias` | `CHORD_RECTIFY_ENDPOINT_ALIAS` | `true` | Keep `/notify` as a compatibility alias for `/rectify` |
+| `-invariant-audit-interval` | `CHORD_INVARIANT_AUDIT_INTERVAL_SECONDS`¹ | `300s` | Periodic invariant audit log interval; set `0` to disable |
+| `-stable-base-min-size` | `CHORD_STABLE_BASE_MIN_SIZE` | `r+1` | Expected minimum stable-base physical anchor count |
+| `-stable-base-members` | `CHORD_STABLE_BASE_MEMBERS` | *(none)* | Comma-separated stable-base anchor HTTPS URIs |
 
 ¹ Environment duration values are **integer seconds** (e.g. `CHORD_HTTP_TIMEOUT_SECONDS=10`). CLI flags use Go duration syntax (e.g. `-http-timeout=10s`).
 
@@ -155,6 +173,8 @@ Most v3.0 features are enabled by default. Parallel lookup is opt-in.
 
 The tracker is fully optional. Once the ring is running, removing the tracker has no effect on routing.
 
+For v5.0 correctness experiments, initialize at least `r+1` long-lived physical anchor nodes before relying on the ring. VNodes improve load distribution but do not count toward the stable-base requirement.
+
 ## Node Lifecycle
 
 ```
@@ -182,15 +202,17 @@ All endpoints use `Content-Type: application/json`. Unknown fields in request bo
 | Method | Path | Auth required | Description |
 |---|---|---|---|
 | `GET` | `/chord/identity` | No | Node ID, URI, status, join time |
-| `GET` | `/chord/state` | Yes | Full Chord state: predecessor, successor, successor list, all 160 finger entries |
+| `GET` | `/chord/state` | Yes | Atomic Chord state snapshot: predecessor, successor list, validity metadata, and all 160 finger entries |
 | `GET` | `/chord/ping` | No | Liveness probe (must respond within 5 s) |
 | `POST` | `/chord/find_successor` | Yes | Iterative lookup — returns `found: true` + successor, or `found: false` + next hop |
 | `GET` | `/chord/predecessor` | Yes | Current predecessor (`null` if none) |
-| `POST` | `/chord/notify` | Yes | Predecessor candidate announcement |
+| `POST` | `/chord/rectify` | Yes | v5 predecessor correction; validates current predecessor liveness before rejecting candidates |
+| `POST` | `/chord/notify` | Yes | Backwards-compatible alias for `/chord/rectify` when enabled |
 | `GET` | `/chord/successor_list` | Yes | Backup successor list (defaults to r=5 entries) |
 | `POST` | `/chord/join` | Yes | Bootstrap entry point for a joining node |
 | `POST` | `/chord/leave` | Yes | Graceful-leave notification from a departing neighbour |
 | `GET` | `/chord/finger_table` | Yes | All 160 finger entries with repair status |
+| `GET` | `/chord/invariant` | Yes | v5 successor-list invariant report and violation details |
 
 `find_successor` uses **iterative** lookup: a node never chains HTTP calls internally. When the answer is not local it returns `{"found": false, "next_hop": {...}}` and the **caller** makes the next request. This keeps HTTP call depth at 1 regardless of ring size.
 
@@ -221,6 +243,7 @@ The "Auth required" column applies only when `--auth.enabled` is set. With auth 
 | 401 | `CERTIFICATE_REVOKED` | Sender's node_id appears in the CRL |
 | 401 | `INVALID_SIGNATURE` | Ed25519 request signature does not verify |
 | 503 | `NODE_ISOLATED` | `find_successor` received while isolated |
+| 503 | `NODE_JOINING` | Rectify received while a node is still joining |
 | 503 | `MAX_HOPS_EXCEEDED` | `hop_count` reached 161 |
 | 503 | `NODE_LEAVING` | Any non-ping request while leaving |
 
@@ -235,6 +258,7 @@ This repo does **not** implement a tracker server — see [ChordDHT-Tracker](htt
 | `GET` | `/tracker/nodes/seeds?count=N&exclude=...&include_cert=true` | Fetch bootstrap seeds |
 | `POST` | `/tracker/nodes/{node_id}/heartbeat` | Periodic heartbeat with ring statistics |
 | `GET` | `/tracker/crl` | Fetch latest CRL (polled each maintenance cycle when auth enabled) |
+| `GET` | `/tracker/stable_base` | On-demand stable-base liveness report for configured anchor URIs |
 
 ## NodeInfo Schema
 

@@ -3,6 +3,7 @@ package chord
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ func (n *Node) RunMaintenance(ctx context.Context) {
 	go n.runCheckPredecessorLoop(ctx)
 	go n.runLatencyProbe(ctx)
 	go n.runCacheCleanup(ctx)
+	go n.runInvariantAuditLoop(ctx)
 }
 
 // MaintenanceCycle is kept for backward compatibility with tests; the real work
@@ -191,6 +193,28 @@ func (n *Node) runCacheCleanup(ctx context.Context) {
 	}
 }
 
+func (n *Node) runInvariantAuditLoop(ctx context.Context) {
+	interval := n.options.InvariantAuditInterval
+	if interval <= 0 {
+		return
+	}
+	for {
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			report := n.InvariantReport()
+			if report.SuccessorListValid {
+				logging.Debugf("invariant audit node_id=%s status=%s successor_list_valid=true successor_list_size=%d", report.NodeID, report.Status, len(report.SuccessorList))
+			} else {
+				logging.Warnf("invariant audit node_id=%s status=%s successor_list_valid=false violations=%v", report.NodeID, report.Status, report.Violations)
+			}
+		}
+	}
+}
+
 // ----- interval selectors -----
 
 func (n *Node) getStabilizeInterval() time.Duration {
@@ -310,23 +334,27 @@ func (n *Node) Stabilize() {
 	status := n.status
 	currentSuccessor := n.successor
 	candidates := append([]NodeInfo{n.successor}, n.successorList...)
+	currentPredecessor := cloneNodePtr(n.predecessor)
 	n.mu.RUnlock()
 	if status != StatusActive {
 		return
 	}
 	candidates = dedupeNodes(candidates, "")
+	selfWithCert := self
+	selfWithCert.Certificate = n.options.NodeCertificate
 	for _, candidate := range candidates {
 		if candidate.NodeID == self.NodeID {
-			n.mu.RLock()
-			pred := cloneNodePtr(n.predecessor)
-			n.mu.RUnlock()
-			if pred == nil || pred.NodeID == self.NodeID || n.client == nil {
+			if currentPredecessor == nil || currentPredecessor.NodeID == self.NodeID || n.client == nil {
 				n.mu.Lock()
 				n.successor = self
 				n.successorList = []NodeInfo{self}
+				n.successorListValid = true
+				now := time.Now().UTC()
+				n.lastInvariantCheck = &now
 				if currentSuccessor.NodeID != self.NodeID {
 					n.status = StatusIsolated
 					n.predecessor = nil
+					n.successorListValid = false
 				}
 				n.mu.Unlock()
 				if currentSuccessor.NodeID != self.NodeID {
@@ -335,21 +363,26 @@ func (n *Node) Stabilize() {
 				}
 				return
 			}
-			successor := pred.Core()
-			selfWithCert := self
-			selfWithCert.Certificate = n.options.NodeCertificate
-			_, _ = n.client.Notify(successor, NotifyRequest{Node: selfWithCert})
-			list := []NodeInfo{successor}
-			if resp, err := n.client.SuccessorList(successor); err == nil {
-				list = append(list, resp.SuccessorList...)
+			successor := currentPredecessor.Core()
+			if !n.pingLiveness(successor) {
+				logging.Warnf("predecessor successor bootstrap skipped; predecessor is not live node_id=%s", successor.NodeID)
+				continue
 			}
+			remote := []NodeInfo{}
+			if state, err := n.fetchSuccessorState(successor); err == nil {
+				remote = state.SuccessorList
+			}
+			n.rectifyPeer(successor, RectifyRequest{Node: selfWithCert})
 			n.mu.Lock()
 			n.successor = successor
-			n.successorList = n.mergeSuccessorListLocked(successor, list)
+			n.successorList = n.mergeSuccessorListLocked(successor, remote)
 			n.fingers[0].Node = successor
 			n.fingers[0].Status = FingerOK
 			n.fingers[0].Valid = true
 			n.mu.Unlock()
+			if n.options.ValidateAfterStabilize {
+				n.validateSuccessorList()
+			}
 			logging.Infof("successor bootstrapped from predecessor successor=%s", successor.NodeID)
 			n.emitTopologyChange()
 			return
@@ -357,7 +390,7 @@ func (n *Node) Stabilize() {
 		if n.client == nil {
 			break
 		}
-		predResp, err := n.client.Predecessor(candidate)
+		state, err := n.fetchSuccessorState(candidate)
 		if err != nil {
 			failures, evicted := n.markFailure(candidate.NodeID)
 			if evicted {
@@ -370,19 +403,22 @@ func (n *Node) Stabilize() {
 		}
 		n.markSuccess(candidate.NodeID)
 		successor := candidate.Core()
-		if predResp.Predecessor != nil && predResp.Predecessor.NodeID != self.NodeID && InRangeOpenOpen(predResp.Predecessor.NodeID, self.NodeID, candidate.NodeID) {
-			successor = predResp.Predecessor.Core()
+		remote := state.SuccessorList
+		if state.Predecessor != nil && state.Predecessor.NodeID != self.NodeID && InRangeOpenOpen(state.Predecessor.NodeID, self.NodeID, candidate.NodeID) {
+			candidatePredecessor := state.Predecessor.Core()
+			if err := ValidateNodeInfo(candidatePredecessor); err != nil {
+				logging.Warnf("stabilize ignored invalid candidate predecessor node_id=%s error=%v", candidatePredecessor.NodeID, err)
+			} else if n.pingLiveness(candidatePredecessor) {
+				successor = candidatePredecessor
+				remote = append([]NodeInfo{candidate.Core()}, state.SuccessorList...)
+			} else {
+				logging.Warnf("stabilize ignored dead candidate predecessor node_id=%s", candidatePredecessor.NodeID)
+			}
 		}
-		selfWithCert := self
-		selfWithCert.Certificate = n.options.NodeCertificate
-		_, _ = n.client.Notify(successor, NotifyRequest{Node: selfWithCert})
-		list := []NodeInfo{successor}
-		if resp, err := n.client.SuccessorList(successor); err == nil {
-			list = append(list, resp.SuccessorList...)
-		}
+		n.rectifyPeer(successor, RectifyRequest{Node: selfWithCert})
 		n.mu.Lock()
 		n.successor = successor
-		n.successorList = n.mergeSuccessorListLocked(successor, list)
+		n.successorList = n.mergeSuccessorListLocked(successor, remote)
 		n.fingers[0].Node = successor
 		n.fingers[0].Status = FingerOK
 		n.fingers[0].Valid = true
@@ -393,6 +429,9 @@ func (n *Node) Stabilize() {
 			n.stabilizeDebounceCount = 0
 		}
 		n.mu.Unlock()
+		if n.options.ValidateAfterStabilize {
+			n.validateSuccessorList()
+		}
 		if topologyChanged {
 			logging.Infof("successor changed from=%s to=%s", currentSuccessor.NodeID, successor.NodeID)
 			n.emitTopologyChange()
@@ -404,9 +443,179 @@ func (n *Node) Stabilize() {
 	n.predecessor = nil
 	n.successor = self
 	n.successorList = []NodeInfo{self}
+	n.successorListValid = false
+	now := time.Now().UTC()
+	n.lastInvariantCheck = &now
 	n.mu.Unlock()
 	logging.Warnf("node became isolated; no successor candidates reachable")
 	n.emitTopologyChange()
+}
+
+func (n *Node) fetchSuccessorState(candidate NodeInfo) (StateResponse, error) {
+	if n.client == nil {
+		return StateResponse{}, NewAPIError(503, ErrUpstream, "peer client is not configured")
+	}
+	if n.options.StabilizeAtomicState {
+		return n.client.State(candidate)
+	}
+	predResp, err := n.client.Predecessor(candidate)
+	if err != nil {
+		return StateResponse{}, err
+	}
+	state := StateResponse{Predecessor: predResp.Predecessor, SnapshotTimestamp: time.Now().UTC()}
+	if listResp, err := n.client.SuccessorList(candidate); err == nil {
+		state.SuccessorList = listResp.SuccessorList
+	}
+	return state, nil
+}
+
+func (n *Node) rectifyPeer(target NodeInfo, req RectifyRequest) {
+	if n.client == nil || target.NodeID == "" || target.NodeID == n.self.NodeID {
+		return
+	}
+	if _, err := n.client.Rectify(target, req); err != nil {
+		logging.Warnf("rectify failed node_id=%s error=%v; falling back to notify", target.NodeID, err)
+		_, _ = n.client.Notify(target, NotifyRequest(req))
+	}
+}
+
+func (n *Node) pingLiveness(target NodeInfo) bool {
+	if target.NodeID == "" {
+		return false
+	}
+	if target.NodeID == n.self.NodeID {
+		return true
+	}
+	if n.client == nil {
+		return false
+	}
+	if err := n.client.PingLiveness(target.URI); err != nil {
+		logging.Debugf("liveness ping failed node_id=%s uri=%s timeout=%s error=%v", target.NodeID, target.URI, n.options.PingLivenessTimeout, err)
+		return false
+	}
+	n.markSuccess(target.NodeID)
+	return true
+}
+
+func (n *Node) validateSuccessorList() {
+	n.mu.RLock()
+	self := n.self.Core()
+	current := cloneNodes(n.successorList)
+	if len(current) == 0 && n.successor.NodeID != "" {
+		current = []NodeInfo{n.successor}
+	}
+	limit := n.options.SuccessorListSize
+	n.mu.RUnlock()
+	if limit <= 0 {
+		limit = DefaultSuccessorListSize
+	}
+
+	results := make([]bool, len(current))
+	var wg sync.WaitGroup
+	for i, node := range current {
+		wg.Add(1)
+		go func(idx int, target NodeInfo) {
+			defer wg.Done()
+			results[idx] = n.pingLiveness(target)
+		}(i, node)
+	}
+	wg.Wait()
+
+	valid := make([]NodeInfo, 0, limit)
+	seen := map[string]bool{}
+	for i, node := range current {
+		if !results[i] || node.NodeID == "" || seen[node.NodeID] {
+			continue
+		}
+		seen[node.NodeID] = true
+		valid = append(valid, node.Core())
+		if len(valid) == limit {
+			break
+		}
+	}
+
+	if len(valid) < limit && len(valid) > 0 && n.client != nil {
+		last := valid[len(valid)-1]
+		if last.NodeID != self.NodeID {
+			if state, err := n.client.State(last); err == nil {
+				for _, node := range state.SuccessorList {
+					if len(valid) == limit {
+						break
+					}
+					if node.NodeID == "" || node.NodeID == self.NodeID || seen[node.NodeID] {
+						continue
+					}
+					if n.pingLiveness(node) {
+						seen[node.NodeID] = true
+						valid = append(valid, node.Core())
+					}
+				}
+			} else {
+				logging.Warnf("successor list extension failed from=%s error=%v", last.NodeID, err)
+			}
+		}
+	}
+
+	now := time.Now().UTC()
+	n.mu.Lock()
+	if len(valid) == 0 {
+		n.status = StatusIsolated
+		n.predecessor = nil
+		n.successor = self
+		n.successorList = []NodeInfo{self}
+		n.successorListValid = false
+		n.lastInvariantCheck = &now
+		n.mu.Unlock()
+		logging.Warnf("node became isolated; successor list has no live entries")
+		n.emitTopologyChange()
+		return
+	}
+	violations := successorListViolations(self.NodeID, valid[0].NodeID, valid)
+	n.successor = valid[0]
+	n.successorList = valid
+	n.successorListValid = len(violations) == 0
+	n.lastInvariantCheck = &now
+	n.fingers[0].Node = valid[0]
+	n.fingers[0].Status = FingerOK
+	n.fingers[0].Valid = true
+	n.mu.Unlock()
+	if len(violations) > 0 {
+		logging.Warnf("successor list invariant violation violations=%v", violations)
+	}
+}
+
+func successorListViolations(selfID, successorID string, list []NodeInfo) []string {
+	violations := []string{}
+	if len(list) == 0 {
+		return []string{"successor_list is empty"}
+	}
+	if successorID != "" && list[0].NodeID != successorID {
+		violations = append(violations, fmt.Sprintf("successor_list[0]=%s does not match successor=%s", list[0].NodeID, successorID))
+	}
+	seen := map[string]bool{}
+	for i, node := range list {
+		if node.NodeID == "" {
+			violations = append(violations, fmt.Sprintf("successor_list[%d] has empty node_id", i))
+			continue
+		}
+		if seen[node.NodeID] {
+			violations = append(violations, fmt.Sprintf("successor_list[%d] duplicates node_id=%s", i, node.NodeID))
+		}
+		seen[node.NodeID] = true
+	}
+	for i := 0; i < len(list)-1; i++ {
+		if list[i].NodeID == selfID || list[i+1].NodeID == selfID {
+			continue
+		}
+		if !InRangeOpenOpen(list[i+1].NodeID, list[i].NodeID, selfID) {
+			violations = append(violations, fmt.Sprintf("successor_list order violation at %d: %s -> %s", i, list[i].NodeID, list[i+1].NodeID))
+		}
+	}
+	return violations
+}
+
+func (n *Node) successorListViolationsLocked(list []NodeInfo) []string {
+	return successorListViolations(n.self.NodeID, n.successor.NodeID, list)
 }
 
 // ----- Batch parallel fix_fingers -----

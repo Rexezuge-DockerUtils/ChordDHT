@@ -205,6 +205,7 @@ func main() {
 	peerClient.SetTimeoutConfig(client.TimeoutConfig{
 		PingSame:           cfg.TimeoutPingSameRegion,
 		PingCross:          cfg.TimeoutPingCrossRegion,
+		PingLiveness:       cfg.PingLivenessTimeout,
 		FindSuccessorSame:  cfg.TimeoutFindSuccessorSame,
 		FindSuccessorCross: cfg.TimeoutFindSuccessorCross,
 		FixFingersSame:     cfg.TimeoutFixFingersSame,
