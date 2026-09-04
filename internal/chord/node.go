@@ -30,9 +30,15 @@ type Options struct {
 	// NodeCertExpiresAt is the Unix timestamp when the node's certificate expires.
 	// Sent to tracker in heartbeat as cert_expires_at.
 	NodeCertExpiresAt *int64
-	// OnCRLRefresh is called after each successful tracker heartbeat with the raw CRL JSON
-	// (or nil if no CRL is available). May be nil.
+	// OnCRLRefresh is called by the dedicated tracker loop on TrackerCRLInterval
+	// (not after every heartbeat). May be nil.
 	OnCRLRefresh func(crlJSON []byte)
+	// TrackerHeartbeatActiveInterval controls anchor heartbeat rate in active mode.
+	TrackerHeartbeatActiveInterval time.Duration
+	// TrackerHeartbeatQuietInterval controls anchor heartbeat rate in quiet mode.
+	TrackerHeartbeatQuietInterval time.Duration
+	// TrackerCRLInterval controls how often the CRL is refreshed from the tracker.
+	TrackerCRLInterval time.Duration
 
 	// v4.0 vnode options
 	VNodeIndex                 int         // 0 = anchor; 1+ = vnode
@@ -96,17 +102,20 @@ type Options struct {
 
 func DefaultOptions() Options {
 	return Options{
-		SuccessorListSize:      DefaultSuccessorListSize,
-		MaintenanceInterval:    DefaultMaintenanceInterval,
-		MaxHops:                DefaultMaxHops,
-		SuspiciousThreshold:    DefaultSuspiciousThreshold,
-		FailedThreshold:        DefaultFailedThreshold,
-		TrackerSeedCount:       DefaultTrackerSeedCount,
-		PingLivenessTimeout:    DefaultPingLivenessTimeout,
-		StabilizeAtomicState:   true,
-		ValidateAfterStabilize: true,
-		RectifyEndpointAlias:   true,
-		InvariantAuditInterval: DefaultInvariantAuditInterval,
+		SuccessorListSize:              DefaultSuccessorListSize,
+		MaintenanceInterval:            DefaultMaintenanceInterval,
+		MaxHops:                        DefaultMaxHops,
+		SuspiciousThreshold:            DefaultSuspiciousThreshold,
+		FailedThreshold:                DefaultFailedThreshold,
+		TrackerSeedCount:               DefaultTrackerSeedCount,
+		PingLivenessTimeout:            DefaultPingLivenessTimeout,
+		StabilizeAtomicState:           true,
+		ValidateAfterStabilize:         true,
+		RectifyEndpointAlias:           true,
+		InvariantAuditInterval:         DefaultInvariantAuditInterval,
+		TrackerHeartbeatActiveInterval: DefaultTrackerHeartbeatActiveInterval,
+		TrackerHeartbeatQuietInterval:  DefaultTrackerHeartbeatQuietInterval,
+		TrackerCRLInterval:             DefaultTrackerCRLInterval,
 
 		Region:                         "",
 		PredecessorListSize:            DefaultPredecessorListSize,
@@ -172,6 +181,10 @@ type Node struct {
 	topologyChangeCh       chan struct{}
 	rttCache               *RTTCache
 	routingCache           *RoutingCache
+
+	// Tracker throttling state (anchor only; vnodes never send).
+	lastTrackerHeartbeatAt time.Time
+	lastCRLRefreshAt       time.Time
 }
 
 func NewNode(uri string, opts Options, client PeerClient, tracker TrackerClient) (*Node, error) {
@@ -204,6 +217,15 @@ func NewNode(uri string, opts Options, client PeerClient, tracker TrackerClient)
 	}
 	if opts.PingLivenessTimeout <= 0 {
 		opts.PingLivenessTimeout = DefaultPingLivenessTimeout
+	}
+	if opts.TrackerHeartbeatActiveInterval <= 0 {
+		opts.TrackerHeartbeatActiveInterval = DefaultTrackerHeartbeatActiveInterval
+	}
+	if opts.TrackerHeartbeatQuietInterval <= 0 {
+		opts.TrackerHeartbeatQuietInterval = DefaultTrackerHeartbeatQuietInterval
+	}
+	if opts.TrackerCRLInterval <= 0 {
+		opts.TrackerCRLInterval = DefaultTrackerCRLInterval
 	}
 	if opts.StableBaseMinSize <= 0 {
 		opts.StableBaseMinSize = opts.SuccessorListSize + 1

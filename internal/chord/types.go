@@ -17,6 +17,14 @@ const (
 	DefaultTrackerSeedCount        = 5
 	DefaultTrackerHeartbeat        = 60 * time.Second
 	DefaultTrackerStaleInterval    = 180 * time.Second
+	// Mode-aware tracker heartbeat intervals. Heartbeats are sent by the
+	// anchor only (vnodes are covered by VNodeEntries) on a dedicated loop,
+	// decoupled from the stabilize interval.
+	DefaultTrackerHeartbeatActiveInterval = 60 * time.Second
+	DefaultTrackerHeartbeatQuietInterval  = 300 * time.Second
+	// How often the CRL is refreshed from the tracker when auth is enabled.
+	// Previously this was fetched after every heartbeat.
+	DefaultTrackerCRLInterval = 600 * time.Second
 
 	DefaultPredecessorListSize = 2
 

@@ -31,6 +31,7 @@ func (n *Node) RunMaintenance(ctx context.Context) {
 	}
 	go n.runModeManager(ctx)
 	go n.runStabilizeLoop(ctx)
+	go n.runTrackerLoop(ctx)
 	go n.runFixFingersLoop(ctx)
 	go n.runCheckPredecessorLoop(ctx)
 	go n.runLatencyProbe(ctx)
@@ -40,6 +41,8 @@ func (n *Node) RunMaintenance(ctx context.Context) {
 
 // MaintenanceCycle is kept for backward compatibility with tests; the real work
 // is now done by the individual goroutine loops launched by RunMaintenance.
+// Tracker heartbeats/CRL refresh run on their own dedicated loop
+// (runTrackerLoop) and are intentionally not sent here.
 func (n *Node) MaintenanceCycle() {
 	status := n.Self().Status
 	if status == StatusActive {
@@ -48,7 +51,6 @@ func (n *Node) MaintenanceCycle() {
 		n.Stabilize()
 		n.fixFingersBatch()
 		n.HealthCheckRing()
-		n.ReportToTracker()
 	} else if status == StatusIsolated {
 		n.tryRecoverFromIsolation()
 	}
@@ -100,7 +102,6 @@ func (n *Node) runStabilizeLoop(ctx context.Context) {
 			n.retryBootstrapIfSingleton()
 			n.Stabilize()
 			n.HealthCheckRing()
-			n.ReportToTracker()
 		} else if status == StatusIsolated {
 			n.tryRecoverFromIsolation()
 		}
@@ -116,6 +117,41 @@ func (n *Node) runStabilizeLoop(ctx context.Context) {
 			timer.Stop()
 			return
 		case <-timer.C:
+		}
+	}
+}
+
+// runTrackerLoop sends anchor heartbeats and CRL refreshes on their own slow,
+// mode-aware intervals. It polls locally every few seconds and each send path
+// self-throttles, so tracker RPCs stay at ~1/min active, ~1/5m quiet, plus
+// ~1 CRL/10m instead of every 15s stabilize cycle. Vnodes return immediately;
+// they are covered by the anchor's registration.
+func (n *Node) runTrackerLoop(ctx context.Context) {
+	if n.tracker == nil || n.IsVNode() {
+		return
+	}
+	n.mu.RLock()
+	status := n.status
+	n.mu.RUnlock()
+	if status == StatusActive {
+		n.ReportToTracker()
+		n.refreshCRLFromTracker()
+	}
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n.mu.RLock()
+			status := n.status
+			n.mu.RUnlock()
+			if status != StatusActive {
+				continue
+			}
+			n.ReportToTracker()
+			n.refreshCRLFromTracker()
 		}
 	}
 }
@@ -804,12 +840,65 @@ func (n *Node) HealthCheckRing() {
 
 // ----- ReportToTracker -----
 
+// getTrackerHeartbeatInterval returns the mode-aware anchor heartbeat interval.
+func (n *Node) getTrackerHeartbeatInterval() time.Duration {
+	n.mu.RLock()
+	mode := n.maintenanceMode
+	n.mu.RUnlock()
+	if mode == ActiveMaintenance {
+		if n.options.TrackerHeartbeatActiveInterval > 0 {
+			return n.options.TrackerHeartbeatActiveInterval
+		}
+		return DefaultTrackerHeartbeatActiveInterval
+	}
+	if n.options.TrackerHeartbeatQuietInterval > 0 {
+		return n.options.TrackerHeartbeatQuietInterval
+	}
+	return DefaultTrackerHeartbeatQuietInterval
+}
+
+func (n *Node) getTrackerCRLInterval() time.Duration {
+	if n.options.TrackerCRLInterval > 0 {
+		return n.options.TrackerCRLInterval
+	}
+	return DefaultTrackerCRLInterval
+}
+
+// ReportToTracker sends an anchor-only heartbeat on a mode-aware interval
+// (60s active / 5m quiet by default), decoupled from stabilize. Vnodes never
+// send; they are covered by the anchor's VNodeEntries registration. CRL
+// refresh is handled separately by refreshCRLFromTracker.
 func (n *Node) ReportToTracker() {
 	if n.tracker == nil {
 		return
 	}
+	if n.IsVNode() {
+		return
+	}
 	n.mu.RLock()
 	status := n.status
+	if status != StatusActive {
+		n.mu.RUnlock()
+		return
+	}
+	last := n.lastTrackerHeartbeatAt
+	n.mu.RUnlock()
+	interval := n.getTrackerHeartbeatInterval()
+	now := time.Now().UTC()
+	if !last.IsZero() && now.Sub(last) < interval {
+		return
+	}
+	// Claim the slot so concurrent callers don't duplicate the heartbeat.
+	n.mu.Lock()
+	if n.lastTrackerHeartbeatAt.After(last) {
+		n.mu.Unlock()
+		return
+	}
+	n.lastTrackerHeartbeatAt = now
+	n.mu.Unlock()
+
+	n.mu.RLock()
+	status = n.status
 	successorID := stringPtrIfNotEmpty(n.successor.NodeID)
 	var predecessorID *string
 	if n.predecessor != nil {
@@ -877,15 +966,39 @@ func (n *Node) ReportToTracker() {
 		return
 	}
 	logging.Debugf("tracker heartbeat sent node_id=%s status=%s", n.self.NodeID, status)
+}
 
-	if n.options.OnCRLRefresh != nil {
-		crlJSON, err := n.tracker.FetchCRL()
-		if err != nil {
-			logging.Debugf("crl fetch from tracker failed: %v", err)
-			return
-		}
-		n.options.OnCRLRefresh(crlJSON)
+// refreshCRLFromTracker fetches the CRL on its own slow interval, anchor-only.
+// Previously this ran after every heartbeat.
+func (n *Node) refreshCRLFromTracker() {
+	if n.tracker == nil || n.options.OnCRLRefresh == nil {
+		return
 	}
+	if n.IsVNode() {
+		return
+	}
+	interval := n.getTrackerCRLInterval()
+	now := time.Now().UTC()
+	n.mu.RLock()
+	last := n.lastCRLRefreshAt
+	n.mu.RUnlock()
+	if !last.IsZero() && now.Sub(last) < interval {
+		return
+	}
+	n.mu.Lock()
+	if n.lastCRLRefreshAt.After(last) {
+		n.mu.Unlock()
+		return
+	}
+	n.lastCRLRefreshAt = now
+	n.mu.Unlock()
+
+	crlJSON, err := n.tracker.FetchCRL()
+	if err != nil {
+		logging.Debugf("crl fetch from tracker failed: %v", err)
+		return
+	}
+	n.options.OnCRLRefresh(crlJSON)
 }
 
 // ----- GracefulLeave -----
