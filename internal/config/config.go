@@ -29,29 +29,32 @@ type AuthConfig struct {
 }
 
 type Config struct {
-	NodeURI                string
-	ListenAddr             string
-	TLSCertFile            string
-	TLSKeyFile             string
-	SkipTLSVerify          bool
-	LogLevel               string
-	TrackerURL             string
-	ManualSeeds            []string
-	HTTPTimeout            time.Duration
-	MaintenanceInterval    time.Duration
-	SuccessorListSize      int
-	MaxHops                int
-	SuspiciousThreshold    int
-	FailedThreshold        int
-	TrackerSeedCount       int
-	PingLivenessTimeout    time.Duration
-	StabilizeAtomicState   bool
-	ValidateAfterStabilize bool
-	RectifyEndpointAlias   bool
-	InvariantAuditInterval time.Duration
-	StableBaseMinSize      int
-	StableBaseMembers      []string
-	Auth                   AuthConfig
+	NodeURI                        string
+	ListenAddr                     string
+	TLSCertFile                    string
+	TLSKeyFile                     string
+	SkipTLSVerify                  bool
+	LogLevel                       string
+	TrackerURL                     string
+	ManualSeeds                    []string
+	HTTPTimeout                    time.Duration
+	MaintenanceInterval            time.Duration
+	SuccessorListSize              int
+	MaxHops                        int
+	SuspiciousThreshold            int
+	FailedThreshold                int
+	TrackerSeedCount               int
+	PingLivenessTimeout            time.Duration
+	StabilizeAtomicState           bool
+	ValidateAfterStabilize         bool
+	RectifyEndpointAlias           bool
+	InvariantAuditInterval         time.Duration
+	TrackerHeartbeatActiveInterval time.Duration
+	TrackerHeartbeatQuietInterval  time.Duration
+	TrackerCRLInterval             time.Duration
+	StableBaseMinSize              int
+	StableBaseMembers              []string
+	Auth                           AuthConfig
 
 	// v4.0 vnode fields
 	VNodeCount                 int
@@ -130,6 +133,9 @@ func Load() (Config, error) {
 	flag.BoolVar(&cfg.ValidateAfterStabilize, "validate-after-stabilize", true, "validate successor list after stabilize")
 	flag.BoolVar(&cfg.RectifyEndpointAlias, "rectify-endpoint-alias", true, "serve /notify as a /rectify compatibility alias")
 	flag.DurationVar(&cfg.InvariantAuditInterval, "invariant-audit-interval", chord.DefaultInvariantAuditInterval, "debug invariant audit interval, 0 disables")
+	flag.DurationVar(&cfg.TrackerHeartbeatActiveInterval, "tracker-heartbeat-active-interval", chord.DefaultTrackerHeartbeatActiveInterval, "tracker heartbeat interval in active mode (anchor only)")
+	flag.DurationVar(&cfg.TrackerHeartbeatQuietInterval, "tracker-heartbeat-quiet-interval", chord.DefaultTrackerHeartbeatQuietInterval, "tracker heartbeat interval in quiet mode (anchor only)")
+	flag.DurationVar(&cfg.TrackerCRLInterval, "tracker-crl-interval", chord.DefaultTrackerCRLInterval, "tracker CRL refresh interval (anchor only)")
 	flag.IntVar(&cfg.StableBaseMinSize, "stable-base-min-size", 0, "stable base minimum size, defaults to successor-list-size+1")
 	flag.StringVar(&stableBaseMembers, "stable-base-members", "", "comma-separated stable base anchor https:// URIs")
 	flag.BoolVar(&cfg.Auth.Enabled, "auth.enabled", false, "enable node identity authentication")
@@ -219,6 +225,9 @@ func Load() (Config, error) {
 	applyEnvBool("CHORD_VALIDATE_AFTER_STABILIZE", &cfg.ValidateAfterStabilize)
 	applyEnvBool("CHORD_RECTIFY_ENDPOINT_ALIAS", &cfg.RectifyEndpointAlias)
 	applyEnvDuration("CHORD_INVARIANT_AUDIT_INTERVAL_SECONDS", &cfg.InvariantAuditInterval)
+	applyEnvDuration("CHORD_TRACKER_HEARTBEAT_ACTIVE", &cfg.TrackerHeartbeatActiveInterval)
+	applyEnvDuration("CHORD_TRACKER_HEARTBEAT_QUIET", &cfg.TrackerHeartbeatQuietInterval)
+	applyEnvDuration("CHORD_TRACKER_CRL_INTERVAL", &cfg.TrackerCRLInterval)
 	applyEnvInt("CHORD_STABLE_BASE_MIN_SIZE", &cfg.StableBaseMinSize)
 	applyEnv("CHORD_STABLE_BASE_MEMBERS", &stableBaseMembers)
 	applyEnvBool("CHORD_AUTH_ENABLED", &cfg.Auth.Enabled)
@@ -363,19 +372,22 @@ func (c Config) ChordOptions() chord.Options {
 		SharedProofVerifyCacheSize: c.SharedProofVerifyCacheSize,
 		TransferTimeout:            c.TransferTimeout,
 
-		SuccessorListSize:      c.SuccessorListSize,
-		MaintenanceInterval:    c.MaintenanceInterval,
-		MaxHops:                c.MaxHops,
-		SuspiciousThreshold:    c.SuspiciousThreshold,
-		FailedThreshold:        c.FailedThreshold,
-		TrackerSeedCount:       c.TrackerSeedCount,
-		PingLivenessTimeout:    c.PingLivenessTimeout,
-		StabilizeAtomicState:   c.StabilizeAtomicState,
-		ValidateAfterStabilize: c.ValidateAfterStabilize,
-		RectifyEndpointAlias:   c.RectifyEndpointAlias,
-		InvariantAuditInterval: c.InvariantAuditInterval,
-		StableBaseMinSize:      c.StableBaseMinSize,
-		StableBaseMembers:      c.StableBaseMembers,
+		SuccessorListSize:              c.SuccessorListSize,
+		MaintenanceInterval:            c.MaintenanceInterval,
+		MaxHops:                        c.MaxHops,
+		SuspiciousThreshold:            c.SuspiciousThreshold,
+		FailedThreshold:                c.FailedThreshold,
+		TrackerSeedCount:               c.TrackerSeedCount,
+		PingLivenessTimeout:            c.PingLivenessTimeout,
+		StabilizeAtomicState:           c.StabilizeAtomicState,
+		ValidateAfterStabilize:         c.ValidateAfterStabilize,
+		RectifyEndpointAlias:           c.RectifyEndpointAlias,
+		InvariantAuditInterval:         c.InvariantAuditInterval,
+		TrackerHeartbeatActiveInterval: c.TrackerHeartbeatActiveInterval,
+		TrackerHeartbeatQuietInterval:  c.TrackerHeartbeatQuietInterval,
+		TrackerCRLInterval:             c.TrackerCRLInterval,
+		StableBaseMinSize:              c.StableBaseMinSize,
+		StableBaseMembers:              c.StableBaseMembers,
 
 		Region:                         c.NodeRegion,
 		PredecessorListSize:            c.PredecessorListSize,
