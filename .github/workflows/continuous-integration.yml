@@ -15,3 +15,27 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
+
+  e2e-chord-client:
+    name: E2E ChordClient (peer binary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run ChordClient binary e2e
+        run: bash .github/scripts/e2e-chord-client.sh
+
+  e2e-tracker-client:
+    name: E2E TrackerClient (fake tracker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run TrackerClient binary e2e
+        run: bash .github/scripts/e2e-tracker-client.sh
