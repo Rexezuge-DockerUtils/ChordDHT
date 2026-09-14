@@ -18,7 +18,7 @@ jobs:
       - run: go test ./...
 
   e2e-chord-client:
-    name: E2E ChordClient (peer binary)
+    name: E2E ChordClient
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -30,7 +30,7 @@ jobs:
         run: bash .github/scripts/e2e-chord-client.sh
 
   e2e-tracker-client:
-    name: E2E TrackerClient (fake tracker)
+    name: E2E TrackerClient
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
