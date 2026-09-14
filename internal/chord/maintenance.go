@@ -121,11 +121,11 @@ func (n *Node) runStabilizeLoop(ctx context.Context) {
 	}
 }
 
-// runTrackerLoop sends anchor heartbeats and CRL refreshes on their own slow,
-// mode-aware intervals. It polls locally every few seconds and each send path
-// self-throttles, so tracker RPCs stay at ~1/min active, ~1/5m quiet, plus
-// ~1 CRL/10m instead of every 15s stabilize cycle. Vnodes return immediately;
-// they are covered by the anchor's registration.
+// runTrackerLoop sends anchor heartbeats (including batched vnode_heartbeats)
+// and CRL refreshes on their own slow, mode-aware intervals. It polls locally
+// every few seconds and each send path self-throttles, so tracker RPCs stay at
+// ~1/min active, ~1/5m quiet, plus ~1 CRL/10m instead of every 15s stabilize
+// cycle. Vnodes return immediately; their snapshots are carried by the anchor.
 func (n *Node) runTrackerLoop(ctx context.Context) {
 	if n.tracker == nil || n.IsVNode() {
 		return
@@ -864,41 +864,11 @@ func (n *Node) getTrackerCRLInterval() time.Duration {
 	return DefaultTrackerCRLInterval
 }
 
-// ReportToTracker sends an anchor-only heartbeat on a mode-aware interval
-// (60s active / 5m quiet by default), decoupled from stabilize. Vnodes never
-// send; they are covered by the anchor's VNodeEntries registration. CRL
-// refresh is handled separately by refreshCRLFromTracker.
-func (n *Node) ReportToTracker() {
-	if n.tracker == nil {
-		return
-	}
-	if n.IsVNode() {
-		return
-	}
-	n.mu.RLock()
+// buildTrackerHeartbeatLocked assembles a heartbeat from mu-guarded fields.
+// Caller must hold at least RLock. Cache snapshots (own locks) are filled in
+// by SnapshotHeartbeat after unlock.
+func (n *Node) buildTrackerHeartbeatLocked() TrackerHeartbeat {
 	status := n.status
-	if status != StatusActive {
-		n.mu.RUnlock()
-		return
-	}
-	last := n.lastTrackerHeartbeatAt
-	n.mu.RUnlock()
-	interval := n.getTrackerHeartbeatInterval()
-	now := time.Now().UTC()
-	if !last.IsZero() && now.Sub(last) < interval {
-		return
-	}
-	// Claim the slot so concurrent callers don't duplicate the heartbeat.
-	n.mu.Lock()
-	if n.lastTrackerHeartbeatAt.After(last) {
-		n.mu.Unlock()
-		return
-	}
-	n.lastTrackerHeartbeatAt = now
-	n.mu.Unlock()
-
-	n.mu.RLock()
-	status = n.status
 	successorID := stringPtrIfNotEmpty(n.successor.NodeID)
 	var predecessorID *string
 	if n.predecessor != nil {
@@ -930,7 +900,7 @@ func (n *Node) ReportToTracker() {
 		}
 	}
 
-	heartbeat := TrackerHeartbeat{
+	return TrackerHeartbeat{
 		Status:                status,
 		SuccessorID:           successorID,
 		PredecessorID:         predecessorID,
@@ -947,6 +917,15 @@ func (n *Node) ReportToTracker() {
 		PredecessorList:       predList,
 		FingerNodes:           fingerNodes,
 	}
+}
+
+// SnapshotHeartbeat returns this node's ID plus a full heartbeat snapshot.
+// Safe for concurrent use; never holds mu across cache snapshots or RPCs.
+// Used by ReportToTracker for both the anchor and each batched vnode.
+func (n *Node) SnapshotHeartbeat() (string, TrackerHeartbeat) {
+	n.mu.RLock()
+	heartbeat := n.buildTrackerHeartbeatLocked()
+	nodeID := n.self.NodeID
 	n.mu.RUnlock()
 
 	if n.rttCache != nil {
@@ -955,7 +934,72 @@ func (n *Node) ReportToTracker() {
 	if n.routingCache != nil {
 		heartbeat.CacheHits, heartbeat.CacheMisses, heartbeat.CacheSize = n.routingCache.Stats()
 	}
-	if err := n.tracker.Heartbeat(n.self.NodeID, heartbeat); err != nil {
+	return nodeID, heartbeat
+}
+
+// ReportToTracker sends an anchor heartbeat on a mode-aware interval
+// (60s active / 5m quiet by default), decoupled from stabilize. Live
+// per-vnode snapshots are piggybacked as vnode_heartbeats (1 RPC per
+// interval). Vnodes never send directly. CRL refresh is handled separately
+// by refreshCRLFromTracker.
+func (n *Node) ReportToTracker() {
+	if n.tracker == nil {
+		return
+	}
+	if n.IsVNode() {
+		return
+	}
+	n.mu.RLock()
+	status := n.status
+	if status != StatusActive {
+		n.mu.RUnlock()
+		return
+	}
+	last := n.lastTrackerHeartbeatAt
+	n.mu.RUnlock()
+	interval := n.getTrackerHeartbeatInterval()
+	now := time.Now().UTC()
+	if !last.IsZero() && now.Sub(last) < interval {
+		return
+	}
+	// Claim the slot so concurrent callers don't duplicate the heartbeat.
+	n.mu.Lock()
+	if n.lastTrackerHeartbeatAt.After(last) {
+		n.mu.Unlock()
+		return
+	}
+	n.lastTrackerHeartbeatAt = now
+	n.mu.Unlock()
+
+	nodeID, heartbeat := n.SnapshotHeartbeat()
+
+	// Attach live per-vnode snapshots (Option B batched reporting).
+	// Each vnode is snapshotted under its own lock; anchor mu is never held
+	// across vnode snapshots, so no ABBA deadlock with stabilize paths.
+	// All vnode statuses are included so the tracker sees truthful per-vnode
+	// state (JOINING/ISOLATED/LEAVING included).
+	if peers := n.vnodePeers(); len(peers) > 0 {
+		limit := n.options.MaxVNodes
+		if limit <= 0 {
+			limit = DefaultMaxVNodes
+		}
+		for _, vn := range peers {
+			if vn == nil || !vn.IsVNode() {
+				continue
+			}
+			if len(heartbeat.VNodeHeartbeats) >= limit {
+				break
+			}
+			vnodeID, vsnap := vn.SnapshotHeartbeat()
+			vsnap.VNodeHeartbeats = nil // vnodes never nest batches
+			heartbeat.VNodeHeartbeats = append(heartbeat.VNodeHeartbeats, VNodeHeartbeat{
+				VNodeID:          vnodeID,
+				TrackerHeartbeat: vsnap,
+			})
+		}
+	}
+
+	if err := n.tracker.Heartbeat(nodeID, heartbeat); err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.Code == ErrNodeNotFound {
 			logging.Warnf("tracker heartbeat node not found, re-registering node_id=%s", n.self.NodeID)
@@ -965,7 +1009,7 @@ func (n *Node) ReportToTracker() {
 		logging.Warnf("tracker heartbeat failed node_id=%s error=%v", n.self.NodeID, err)
 		return
 	}
-	logging.Debugf("tracker heartbeat sent node_id=%s status=%s", n.self.NodeID, status)
+	logging.Debugf("tracker heartbeat sent node_id=%s status=%s vnodes=%d", n.self.NodeID, heartbeat.Status, len(heartbeat.VNodeHeartbeats))
 }
 
 // refreshCRLFromTracker fetches the CRL on its own slow interval, anchor-only.

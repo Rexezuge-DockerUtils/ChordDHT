@@ -23,6 +23,146 @@ func (r *recordingTracker) Deregister(_ string) error                    { retur
 func (r *recordingTracker) Heartbeat(_ string, _ TrackerHeartbeat) error { return nil }
 func (r *recordingTracker) FetchCRL() ([]byte, error)                    { return nil, nil }
 
+// heartbeatRecorder captures Heartbeat calls for batched-reporting assertions.
+type heartbeatRecorder struct {
+	mu         sync.Mutex
+	calls      []string
+	heartbeats []TrackerHeartbeat
+}
+
+func (r *heartbeatRecorder) Seeds(_ int, _ []string) ([]NodeInfo, error) { return nil, nil }
+func (r *heartbeatRecorder) Register(_ NodeInfo) (string, error)         { return "", nil }
+func (r *heartbeatRecorder) Deregister(_ string) error                   { return nil }
+func (r *heartbeatRecorder) Heartbeat(nodeID string, hb TrackerHeartbeat) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, nodeID)
+	r.heartbeats = append(r.heartbeats, hb)
+	return nil
+}
+func (r *heartbeatRecorder) FetchCRL() ([]byte, error) { return nil, nil }
+func (r *heartbeatRecorder) heartbeatCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
+}
+
+// TestAnchorHeartbeatBatchesVNodeSnapshots verifies Option B reporting:
+//  1. Anchor ReportToTracker sends 1 RPC carrying all vnode snapshots.
+//  2. Vnode ReportToTracker sends nothing (anchor-only traffic).
+//  3. Immediate second anchor heartbeat is throttled (no duplicate RPC).
+func TestAnchorHeartbeatBatchesVNodeSnapshots(t *testing.T) {
+	tracker := &heartbeatRecorder{}
+
+	anchorOpts := DefaultOptions()
+	anchor, err := NewNode("https://anchor.example.com", anchorOpts, nil, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor.ActivateSingleNode()
+
+	anchorID := anchor.Self().NodeID
+	_, privKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vnodes []*Node
+	for i := 1; i <= 2; i++ {
+		proof := SignVNodeProof(anchorID, i, privKey, DefaultMaintenanceInterval)
+		vnodeOpts := anchorOpts
+		vnodeOpts.VNodeIndex = i
+		vnodeOpts.AnchorID = anchorID
+		vnodeOpts.VNodeProofPtr = proof
+		vn, err := NewNode("https://anchor.example.com", vnodeOpts, nil, tracker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vn.ActivateSingleNode()
+		vnodes = append(vnodes, vn)
+	}
+	anchor.SetVNodeProvider(func() []*Node { return vnodes })
+
+	anchor.ReportToTracker()
+	if got := tracker.heartbeatCalls(); got != 1 {
+		t.Fatalf("expected 1 batched heartbeat RPC, got %d", got)
+	}
+	batched := tracker.heartbeats[0]
+	if len(batched.VNodeHeartbeats) != 2 {
+		t.Fatalf("expected 2 vnode snapshots in batch, got %d", len(batched.VNodeHeartbeats))
+	}
+	want := map[string]bool{vnodes[0].Self().NodeID: false, vnodes[1].Self().NodeID: false}
+	for _, item := range batched.VNodeHeartbeats {
+		if _, ok := want[item.VNodeID]; !ok {
+			t.Fatalf("unexpected vnode_id in batch: %s", item.VNodeID)
+		}
+		want[item.VNodeID] = true
+		if len(item.VNodeHeartbeats) != 0 {
+			t.Fatal("vnode snapshots must not nest batches")
+		}
+		if item.Status != StatusActive {
+			t.Fatalf("expected ACTIVE vnode snapshot, got %s", item.Status)
+		}
+	}
+
+	// Vnodes never send tracker traffic directly.
+	vnodes[0].ReportToTracker()
+	vnodes[1].ReportToTracker()
+	if got := tracker.heartbeatCalls(); got != 1 {
+		t.Fatalf("vnode ReportToTracker must not send; total calls = %d, want 1", got)
+	}
+
+	// Throttle: immediate second anchor heartbeat is a no-op.
+	anchor.ReportToTracker()
+	if got := tracker.heartbeatCalls(); got != 1 {
+		t.Fatalf("throttled heartbeat must not send; total calls = %d, want 1", got)
+	}
+}
+
+// TestAnchorHeartbeatBatchRespectsMaxVNodes verifies the batch is capped so the
+// tracker never sees more items than its MAX_VNODES_PER_ANCHOR limit.
+func TestAnchorHeartbeatBatchRespectsMaxVNodes(t *testing.T) {
+	tracker := &heartbeatRecorder{}
+
+	anchorOpts := DefaultOptions()
+	anchor, err := NewNode("https://anchor.example.com", anchorOpts, nil, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor.ActivateSingleNode()
+
+	anchorID := anchor.Self().NodeID
+	_, privKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vnodes []*Node
+	for i := 1; i <= 3; i++ {
+		proof := SignVNodeProof(anchorID, i, privKey, DefaultMaintenanceInterval)
+		vnodeOpts := anchorOpts
+		vnodeOpts.VNodeIndex = i
+		vnodeOpts.AnchorID = anchorID
+		vnodeOpts.VNodeProofPtr = proof
+		vn, err := NewNode("https://anchor.example.com", vnodeOpts, nil, tracker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		vn.ActivateSingleNode()
+		vnodes = append(vnodes, vn)
+	}
+	anchor.SetVNodeProvider(func() []*Node { return vnodes })
+	anchor.mu.Lock()
+	anchor.options.MaxVNodes = 1
+	anchor.mu.Unlock()
+
+	anchor.ReportToTracker()
+	if got := tracker.heartbeatCalls(); got != 1 {
+		t.Fatalf("expected 1 batched heartbeat RPC, got %d", got)
+	}
+	if got := len(tracker.heartbeats[0].VNodeHeartbeats); got != 1 {
+		t.Fatalf("expected batch capped at 1, got %d", got)
+	}
+}
+
 // TestVNodeTrackerRegistration verifies that:
 //  1. Anchor's JoinNetwork registers with the tracker.
 //  2. Vnode's JoinNetwork does NOT call tracker.Register (guard in registerTracker).
