@@ -17,9 +17,12 @@ const (
 	DefaultTrackerSeedCount        = 5
 	DefaultTrackerHeartbeat        = 60 * time.Second
 	DefaultTrackerStaleInterval    = 180 * time.Second
+	DefaultMaxVNodes               = 8
 	// Mode-aware tracker heartbeat intervals. Heartbeats are sent by the
-	// anchor only (vnodes are covered by VNodeEntries) on a dedicated loop,
-	// decoupled from the stabilize interval.
+	// anchor on a dedicated loop, decoupled from the stabilize interval.
+	// Per-vnode liveness/topology is carried as a batched vnode_heartbeats
+	// array inside the anchor heartbeat (1 RPC per interval); vnodes never
+	// send tracker traffic directly.
 	DefaultTrackerHeartbeatActiveInterval = 60 * time.Second
 	DefaultTrackerHeartbeatQuietInterval  = 300 * time.Second
 	// How often the CRL is refreshed from the tracker when auth is enabled.
@@ -248,6 +251,18 @@ type TrackerHeartbeat struct {
 	PredecessorList       []string         `json:"predecessor_list,omitempty"`
 	RTTSamples            map[string]int64 `json:"rtt_samples,omitempty"`
 	FingerNodes           []string         `json:"finger_nodes,omitempty"`
+	// VNodeHeartbeats carries live per-vnode snapshots inside the anchor
+	// heartbeat (Option B batched reporting). Empty for anchors without
+	// vnodes; never set by vnodes themselves (they never send heartbeats).
+	VNodeHeartbeats []VNodeHeartbeat `json:"vnode_heartbeats,omitempty"`
+}
+
+// VNodeHeartbeat is a per-vnode heartbeat snapshot piggybacked on the anchor
+// heartbeat. It flattens TrackerHeartbeat alongside the vnode's ID so the
+// tracker can apply the same UPDATE vnodes logic as a direct vnode heartbeat.
+type VNodeHeartbeat struct {
+	VNodeID string `json:"vnode_id"`
+	TrackerHeartbeat
 }
 
 type RTTResponse struct {

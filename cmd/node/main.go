@@ -250,6 +250,9 @@ func main() {
 			})
 		}
 		node.SetVNodeEntries(vnodeEntries)
+		// Wire live vnodes so the anchor's tracker heartbeat carries batched
+		// per-vnode snapshots (1 RPC per interval instead of 1+N).
+		node.SetVNodeProvider(func() []*chord.Node { return vnodes })
 
 		// Join each vnode into the ring.
 		for i, vn := range vnodes {

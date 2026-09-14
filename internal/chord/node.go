@@ -185,6 +185,12 @@ type Node struct {
 	// Tracker throttling state (anchor only; vnodes never send).
 	lastTrackerHeartbeatAt time.Time
 	lastCRLRefreshAt       time.Time
+
+	// vnodeProvider returns the live vnode Nodes owned by this anchor.
+	// Set by the host process (cmd/node) so ReportToTracker can attach
+	// batched per-vnode snapshots. Nil for vnodes and anchor-only nodes.
+	// Accessed under mu; the func itself must be safe for concurrent use.
+	vnodeProvider func() []*Node
 }
 
 func NewNode(uri string, opts Options, client PeerClient, tracker TrackerClient) (*Node, error) {
@@ -353,6 +359,26 @@ func (n *Node) SetVNodeEntries(entries []VNodeEntry) {
 	n.mu.Lock()
 	n.options.VNodeEntries = entries
 	n.mu.Unlock()
+}
+
+// SetVNodeProvider installs the func returning this anchor's live vnodes.
+// The provider is consulted by ReportToTracker to build the batched
+// vnode_heartbeats array. Pass nil to disable batching.
+func (n *Node) SetVNodeProvider(provider func() []*Node) {
+	n.mu.Lock()
+	n.vnodeProvider = provider
+	n.mu.Unlock()
+}
+
+// vnodePeers returns the current live vnodes without holding mu across calls.
+func (n *Node) vnodePeers() []*Node {
+	n.mu.RLock()
+	provider := n.vnodeProvider
+	n.mu.RUnlock()
+	if provider == nil {
+		return nil
+	}
+	return provider()
 }
 
 func (n *Node) State() StateResponse {
