@@ -30,9 +30,17 @@ type Options struct {
 	// NodeCertExpiresAt is the Unix timestamp when the node's certificate expires.
 	// Sent to tracker in heartbeat as cert_expires_at.
 	NodeCertExpiresAt *int64
-	// OnCRLRefresh is called by the dedicated tracker loop on TrackerCRLInterval
-	// (not after every heartbeat). May be nil.
+	// OnCRLRefresh is called with CRL JSON from the tracker. The primary path
+	// is the inline CRL piggybacked on heartbeat responses (see
+	// CurrentCRLVersion); GET /tracker/crl via refreshCRLFromTracker remains
+	// as a fallback for legacy trackers without piggyback support. May be nil.
 	OnCRLRefresh func(crlJSON []byte)
+	// CurrentCRLVersion reports the locally applied CRL version (0 = none).
+	// Wired by the host process to the request verifier; may be nil, in which
+	// case heartbeats opt in with version 0 when OnCRLRefresh is set.
+	// The tracker only sends the inline CRL payload when the request carries
+	// crl_version, so nodes with CRL refresh disabled omit it to save bandwidth.
+	CurrentCRLVersion func() int
 	// TrackerHeartbeatActiveInterval controls anchor heartbeat rate in active mode.
 	TrackerHeartbeatActiveInterval time.Duration
 	// TrackerHeartbeatQuietInterval controls anchor heartbeat rate in quiet mode.

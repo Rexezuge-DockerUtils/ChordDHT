@@ -255,6 +255,10 @@ type TrackerHeartbeat struct {
 	// heartbeat (Option B batched reporting). Empty for anchors without
 	// vnodes; never set by vnodes themselves (they never send heartbeats).
 	VNodeHeartbeats []VNodeHeartbeat `json:"vnode_heartbeats,omitempty"`
+	// CRLVersion is the locally applied CRL version (0 = none). Sent only
+	// when the node wants inline CRL updates (auth with CRL refresh enabled);
+	// omitted otherwise. Old trackers ignore it.
+	CRLVersion *int `json:"crl_version,omitempty"`
 }
 
 // VNodeHeartbeat is a per-vnode heartbeat snapshot piggybacked on the anchor
@@ -263,6 +267,32 @@ type TrackerHeartbeat struct {
 type VNodeHeartbeat struct {
 	VNodeID string `json:"vnode_id"`
 	TrackerHeartbeat
+}
+
+// TrackerHeartbeatVNodeError is a per-item vnode heartbeat failure reported
+// by the tracker inside a heartbeat response.
+type TrackerHeartbeatVNodeError struct {
+	VNodeID string `json:"vnode_id"`
+	Code    string `json:"code"`
+}
+
+// TrackerHeartbeatVNodesResult summarizes batched vnode heartbeat application.
+type TrackerHeartbeatVNodesResult struct {
+	Updated int                          `json:"updated"`
+	Errors  []TrackerHeartbeatVNodeError `json:"errors"`
+}
+
+// TrackerHeartbeatResult is the tracker's response to an anchor heartbeat.
+// CRLVersion is always set by new trackers (0 when no CRL is stored) and
+// absent on old trackers. CRL carries the inline signed CRL JSON, present
+// only when the request opted in with crl_version and the tracker holds a
+// newer version. Callers must verify the CRL signature before applying it.
+type TrackerHeartbeatResult struct {
+	Acknowledged bool                          `json:"acknowledged"`
+	TrackerTime  string                        `json:"tracker_time"`
+	VNodes       *TrackerHeartbeatVNodesResult `json:"vnodes,omitempty"`
+	CRLVersion   *int                          `json:"crl_version,omitempty"`
+	CRL          json.RawMessage               `json:"crl,omitempty"`
 }
 
 type RTTResponse struct {
@@ -360,6 +390,6 @@ type TrackerClient interface {
 	Seeds(count int, exclude []string) ([]NodeInfo, error)
 	Register(node NodeInfo) (string, error)
 	Deregister(nodeID string) error
-	Heartbeat(nodeID string, heartbeat TrackerHeartbeat) error
+	Heartbeat(nodeID string, heartbeat TrackerHeartbeat) (*TrackerHeartbeatResult, error)
 	FetchCRL() ([]byte, error)
 }

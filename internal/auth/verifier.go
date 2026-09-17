@@ -23,7 +23,7 @@ type VerifierConfig struct {
 	NonceCache         *NonceCache
 	CertCache          *CertCache
 	ToleranceSecs      int
-	BootGracePeriodEnd time.Time    // zero value = no grace period
+	BootGracePeriodEnd time.Time     // zero value = no grace period
 	ClockSkewTolerance time.Duration // v4.0: tolerance for VNodeProof expiry check (default 30s)
 }
 
@@ -72,6 +72,18 @@ func (v *RequestVerifier) getCRL() *CRL {
 	v.crl.mu.RLock()
 	defer v.crl.mu.RUnlock()
 	return v.crl.crl
+}
+
+// CRLVersion returns the version of the currently applied CRL, or 0 when no
+// CRL is loaded. The tracker heartbeat reports this as crl_version so the
+// tracker can piggyback CRL updates inline.
+func (v *RequestVerifier) CRLVersion() int {
+	v.crl.mu.RLock()
+	defer v.crl.mu.RUnlock()
+	if v.crl.crl == nil {
+		return 0
+	}
+	return v.crl.crl.Version
 }
 
 // CacheIncomingCert stores a certificate that was already verified by the middleware

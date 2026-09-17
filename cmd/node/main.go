@@ -175,6 +175,10 @@ func main() {
 				verifier.SetCRL(crl)
 				logging.Debugf("crl updated from tracker version=%d revoked=%d", crl.Version, len(crl.RevokedIDs))
 			}
+			// Report the applied CRL version on heartbeats so the tracker can
+			// piggyback CRL updates inline (verified payloads only: the
+			// verifier holds solely signature-checked CRLs).
+			chordOpts.CurrentCRLVersion = verifier.CRLVersion
 		}
 	}
 

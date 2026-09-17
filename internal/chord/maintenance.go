@@ -121,11 +121,12 @@ func (n *Node) runStabilizeLoop(ctx context.Context) {
 	}
 }
 
-// runTrackerLoop sends anchor heartbeats (including batched vnode_heartbeats)
-// and CRL refreshes on their own slow, mode-aware intervals. It polls locally
-// every few seconds and each send path self-throttles, so tracker RPCs stay at
-// ~1/min active, ~1/5m quiet, plus ~1 CRL/10m instead of every 15s stabilize
-// cycle. Vnodes return immediately; their snapshots are carried by the anchor.
+// runTrackerLoop sends anchor heartbeats (including batched vnode_heartbeats
+// and the crl_version opt-in for inline CRL updates) on a mode-aware interval.
+// It polls locally every few seconds and ReportToTracker self-throttles, so
+// tracker RPCs stay at ~1/min active, ~1/5m quiet instead of every 15s
+// stabilize cycle. Vnodes return immediately; their snapshots are carried by
+// the anchor.
 func (n *Node) runTrackerLoop(ctx context.Context) {
 	if n.tracker == nil || n.IsVNode() {
 		return
@@ -135,7 +136,6 @@ func (n *Node) runTrackerLoop(ctx context.Context) {
 	n.mu.RUnlock()
 	if status == StatusActive {
 		n.ReportToTracker()
-		n.refreshCRLFromTracker()
 	}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -151,7 +151,6 @@ func (n *Node) runTrackerLoop(ctx context.Context) {
 				continue
 			}
 			n.ReportToTracker()
-			n.refreshCRLFromTracker()
 		}
 	}
 }
@@ -940,8 +939,10 @@ func (n *Node) SnapshotHeartbeat() (string, TrackerHeartbeat) {
 // ReportToTracker sends an anchor heartbeat on a mode-aware interval
 // (60s active / 5m quiet by default), decoupled from stabilize. Live
 // per-vnode snapshots are piggybacked as vnode_heartbeats (1 RPC per
-// interval). Vnodes never send directly. CRL refresh is handled separately
-// by refreshCRLFromTracker.
+// interval). Vnodes never send directly. When CRL refresh is enabled
+// (OnCRLRefresh != nil) the heartbeat opts in with crl_version and applies
+// the inline CRL from the response; legacy trackers without piggyback support
+// fall back to refreshCRLFromTracker.
 func (n *Node) ReportToTracker() {
 	if n.tracker == nil {
 		return
@@ -973,6 +974,19 @@ func (n *Node) ReportToTracker() {
 
 	nodeID, heartbeat := n.SnapshotHeartbeat()
 
+	// Opt in to inline CRL updates only when something consumes them.
+	// The tracker sends the (potentially large) CRL payload solely in this
+	// case, so nodes with CRL refresh disabled omit crl_version entirely.
+	// Set here — never in SnapshotHeartbeat — so batched vnode snapshots
+	// don't carry it.
+	if n.options.OnCRLRefresh != nil {
+		version := 0
+		if n.options.CurrentCRLVersion != nil {
+			version = n.options.CurrentCRLVersion()
+		}
+		heartbeat.CRLVersion = &version
+	}
+
 	// Attach live per-vnode snapshots (Option B batched reporting).
 	// Each vnode is snapshotted under its own lock; anchor mu is never held
 	// across vnode snapshots, so no ABBA deadlock with stabilize paths.
@@ -999,7 +1013,8 @@ func (n *Node) ReportToTracker() {
 		}
 	}
 
-	if err := n.tracker.Heartbeat(nodeID, heartbeat); err != nil {
+	resp, err := n.tracker.Heartbeat(nodeID, heartbeat)
+	if err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) && apiErr.Code == ErrNodeNotFound {
 			logging.Warnf("tracker heartbeat node not found, re-registering node_id=%s", n.self.NodeID)
@@ -1009,11 +1024,25 @@ func (n *Node) ReportToTracker() {
 		logging.Warnf("tracker heartbeat failed node_id=%s error=%v", n.self.NodeID, err)
 		return
 	}
+	if resp != nil && n.options.OnCRLRefresh != nil {
+		switch {
+		case len(resp.CRL) > 0:
+			// Steady state: apply the piggybacked CRL (the callback verifies
+			// the CA signature and ignores invalid payloads).
+			n.options.OnCRLRefresh(resp.CRL)
+		case resp.CRLVersion == nil:
+			// Legacy tracker without CRL piggyback support: fall back to the
+			// standalone CRL endpoint, throttled by TrackerCRLInterval.
+			n.refreshCRLFromTracker()
+		}
+	}
 	logging.Debugf("tracker heartbeat sent node_id=%s status=%s vnodes=%d", n.self.NodeID, heartbeat.Status, len(heartbeat.VNodeHeartbeats))
 }
 
-// refreshCRLFromTracker fetches the CRL on its own slow interval, anchor-only.
-// Previously this ran after every heartbeat.
+// refreshCRLFromTracker is the legacy fallback for trackers without CRL
+// piggyback support: it fetches the CRL on its own slow interval, anchor-only.
+// New trackers deliver the CRL inline on heartbeat responses, so this runs
+// only when a heartbeat response carries no crl_version.
 func (n *Node) refreshCRLFromTracker() {
 	if n.tracker == nil || n.options.OnCRLRefresh == nil {
 		return
