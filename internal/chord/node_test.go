@@ -19,9 +19,11 @@ func (r *recordingTracker) Register(node NodeInfo) (string, error) {
 	r.registered = append(r.registered, node)
 	return "", nil
 }
-func (r *recordingTracker) Deregister(_ string) error                    { return nil }
-func (r *recordingTracker) Heartbeat(_ string, _ TrackerHeartbeat) error { return nil }
-func (r *recordingTracker) FetchCRL() ([]byte, error)                    { return nil, nil }
+func (r *recordingTracker) Deregister(_ string) error { return nil }
+func (r *recordingTracker) Heartbeat(_ string, _ TrackerHeartbeat) (*TrackerHeartbeatResult, error) {
+	return &TrackerHeartbeatResult{Acknowledged: true}, nil
+}
+func (r *recordingTracker) FetchCRL() ([]byte, error) { return nil, nil }
 
 // heartbeatRecorder captures Heartbeat calls for batched-reporting assertions.
 type heartbeatRecorder struct {
@@ -33,12 +35,12 @@ type heartbeatRecorder struct {
 func (r *heartbeatRecorder) Seeds(_ int, _ []string) ([]NodeInfo, error) { return nil, nil }
 func (r *heartbeatRecorder) Register(_ NodeInfo) (string, error)         { return "", nil }
 func (r *heartbeatRecorder) Deregister(_ string) error                   { return nil }
-func (r *heartbeatRecorder) Heartbeat(nodeID string, hb TrackerHeartbeat) error {
+func (r *heartbeatRecorder) Heartbeat(nodeID string, hb TrackerHeartbeat) (*TrackerHeartbeatResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, nodeID)
 	r.heartbeats = append(r.heartbeats, hb)
-	return nil
+	return &TrackerHeartbeatResult{Acknowledged: true}, nil
 }
 func (r *heartbeatRecorder) FetchCRL() ([]byte, error) { return nil, nil }
 func (r *heartbeatRecorder) heartbeatCalls() int {
@@ -160,6 +162,138 @@ func TestAnchorHeartbeatBatchRespectsMaxVNodes(t *testing.T) {
 	}
 	if got := len(tracker.heartbeats[0].VNodeHeartbeats); got != 1 {
 		t.Fatalf("expected batch capped at 1, got %d", got)
+	}
+}
+
+// crlPiggybackTracker serves a canned heartbeat result and counts standalone
+// CRL fetches, so tests can distinguish inline delivery from legacy fallback.
+type crlPiggybackTracker struct {
+	mu         sync.Mutex
+	heartbeats []TrackerHeartbeat
+	result     TrackerHeartbeatResult
+	fetchJSON  []byte
+	refreshes  int
+}
+
+func (t *crlPiggybackTracker) Seeds(_ int, _ []string) ([]NodeInfo, error) { return nil, nil }
+func (t *crlPiggybackTracker) Register(_ NodeInfo) (string, error)         { return "", nil }
+func (t *crlPiggybackTracker) Deregister(_ string) error                   { return nil }
+func (t *crlPiggybackTracker) Heartbeat(_ string, hb TrackerHeartbeat) (*TrackerHeartbeatResult, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.heartbeats = append(t.heartbeats, hb)
+	cp := t.result
+	return &cp, nil
+}
+func (t *crlPiggybackTracker) FetchCRL() ([]byte, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.refreshes++
+	return t.fetchJSON, nil
+}
+
+func newCRLPiggybackNode(t *testing.T, tracker *crlPiggybackTracker, currentVersion int, refreshed *[][]byte) *Node {
+	t.Helper()
+	opts := DefaultOptions()
+	opts.OnCRLRefresh = func(crlJSON []byte) { *refreshed = append(*refreshed, crlJSON) }
+	opts.CurrentCRLVersion = func() int { return currentVersion }
+	node, err := NewNode("https://anchor.example.com", opts, nil, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.ActivateSingleNode()
+	return node
+}
+
+// TestHeartbeatSendsCRLVersionAndSkipsFetchWhenCurrent verifies the steady
+// state: the heartbeat opts in with crl_version and an up-to-date client
+// triggers neither OnCRLRefresh nor a standalone FetchCRL.
+func TestHeartbeatSendsCRLVersionAndSkipsFetchWhenCurrent(t *testing.T) {
+	latest := 7
+	tracker := &crlPiggybackTracker{result: TrackerHeartbeatResult{Acknowledged: true, CRLVersion: &latest}}
+	var refreshed [][]byte
+	node := newCRLPiggybackNode(t, tracker, 7, &refreshed)
+
+	node.ReportToTracker()
+
+	if len(tracker.heartbeats) != 1 {
+		t.Fatalf("expected 1 heartbeat RPC, got %d", len(tracker.heartbeats))
+	}
+	sent := tracker.heartbeats[0].CRLVersion
+	if sent == nil || *sent != 7 {
+		t.Fatalf("expected crl_version=7 in heartbeat, got %+v", tracker.heartbeats[0].CRLVersion)
+	}
+	if len(refreshed) != 0 {
+		t.Fatalf("expected no CRL refresh when up to date, got %d", len(refreshed))
+	}
+	if tracker.refreshes != 0 {
+		t.Fatalf("expected no standalone FetchCRL with piggyback support, got %d", tracker.refreshes)
+	}
+}
+
+// TestHeartbeatAppliesInlineCRL verifies a stale client applies the CRL
+// piggybacked on the heartbeat response without a separate fetch.
+func TestHeartbeatAppliesInlineCRL(t *testing.T) {
+	latest := 8
+	crlJSON := []byte(`{"version":8,"updated_at":1780000000,"revoked_node_ids":[],"signature":"sig"}`)
+	tracker := &crlPiggybackTracker{
+		result: TrackerHeartbeatResult{Acknowledged: true, CRLVersion: &latest, CRL: crlJSON},
+	}
+	var refreshed [][]byte
+	node := newCRLPiggybackNode(t, tracker, 7, &refreshed)
+
+	node.ReportToTracker()
+
+	if len(refreshed) != 1 || string(refreshed[0]) != string(crlJSON) {
+		t.Fatalf("expected inline CRL to be applied, got %q", refreshed)
+	}
+	if tracker.refreshes != 0 {
+		t.Fatalf("expected no standalone FetchCRL when CRL is inline, got %d", tracker.refreshes)
+	}
+}
+
+// TestHeartbeatFallsBackToFetchCRLOnLegacyTracker verifies old trackers
+// (heartbeat response without crl_version) still deliver CRL updates via the
+// standalone endpoint.
+func TestHeartbeatFallsBackToFetchCRLOnLegacyTracker(t *testing.T) {
+	fetchJSON := []byte(`{"version":3,"updated_at":1780000000,"revoked_node_ids":[],"signature":"sig"}`)
+	tracker := &crlPiggybackTracker{
+		result:    TrackerHeartbeatResult{Acknowledged: true},
+		fetchJSON: fetchJSON,
+	}
+	var refreshed [][]byte
+	node := newCRLPiggybackNode(t, tracker, 0, &refreshed)
+
+	node.ReportToTracker()
+
+	if len(tracker.heartbeats) != 1 {
+		t.Fatalf("expected 1 heartbeat RPC, got %d", len(tracker.heartbeats))
+	}
+	if sent := tracker.heartbeats[0].CRLVersion; sent == nil || *sent != 0 {
+		t.Fatalf("expected crl_version=0 opt-in, got %+v", tracker.heartbeats[0].CRLVersion)
+	}
+	if len(refreshed) != 1 || string(refreshed[0]) != string(fetchJSON) {
+		t.Fatalf("expected fallback FetchCRL to be applied, got %q", refreshed)
+	}
+}
+
+// TestHeartbeatOmitsCRLVersionWhenRefreshDisabled verifies nodes without CRL
+// refresh neither opt in nor pay for the inline payload.
+func TestHeartbeatOmitsCRLVersionWhenRefreshDisabled(t *testing.T) {
+	tracker := &heartbeatRecorder{}
+	anchor, err := NewNode("https://anchor.example.com", DefaultOptions(), nil, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor.ActivateSingleNode()
+
+	anchor.ReportToTracker()
+
+	if len(tracker.heartbeats) != 1 {
+		t.Fatalf("expected 1 heartbeat RPC, got %d", len(tracker.heartbeats))
+	}
+	if tracker.heartbeats[0].CRLVersion != nil {
+		t.Fatalf("expected no crl_version without OnCRLRefresh, got %d", *tracker.heartbeats[0].CRLVersion)
 	}
 }
 
@@ -408,9 +542,11 @@ func (t *sequenceTracker) Register(node NodeInfo) (string, error) {
 	t.registered = append(t.registered, node)
 	return "", nil
 }
-func (t *sequenceTracker) Deregister(_ string) error                    { return nil }
-func (t *sequenceTracker) Heartbeat(_ string, _ TrackerHeartbeat) error { return nil }
-func (t *sequenceTracker) FetchCRL() ([]byte, error)                    { return nil, nil }
+func (t *sequenceTracker) Deregister(_ string) error { return nil }
+func (t *sequenceTracker) Heartbeat(_ string, _ TrackerHeartbeat) (*TrackerHeartbeatResult, error) {
+	return &TrackerHeartbeatResult{Acknowledged: true}, nil
+}
+func (t *sequenceTracker) FetchCRL() ([]byte, error) { return nil, nil }
 func (t *sequenceTracker) SeedCalls() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()

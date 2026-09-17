@@ -91,8 +91,12 @@ func (c *TrackerClient) DetectRegion() (string, error) {
 	return "", nil
 }
 
-func (c *TrackerClient) Heartbeat(nodeID string, heartbeat chord.TrackerHeartbeat) error {
-	return c.endpoint.do(http.MethodPost, "/tracker/nodes/"+url.PathEscape(nodeID)+"/heartbeat", heartbeat, nil)
+func (c *TrackerClient) Heartbeat(nodeID string, heartbeat chord.TrackerHeartbeat) (*chord.TrackerHeartbeatResult, error) {
+	var resp chord.TrackerHeartbeatResult
+	if err := c.endpoint.do(http.MethodPost, "/tracker/nodes/"+url.PathEscape(nodeID)+"/heartbeat", heartbeat, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // FetchCRL retrieves the raw CRL JSON from the tracker's GET /tracker/crl endpoint.
